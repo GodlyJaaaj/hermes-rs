@@ -26,7 +26,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-hermes-client = { package = "hermes-broker-client", path = "../client", version = "0.1.0" }
+# hermes-client = { package = "hermes-broker-client", path = "../client", version = "0.1.0" }
 futures = { workspace = true }
 serde = { workspace = true }
 criterion = { workspace = true }
