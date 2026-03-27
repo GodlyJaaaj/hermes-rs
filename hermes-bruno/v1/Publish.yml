@@ -5,7 +5,7 @@ info:
 
 grpc:
   url: "{{LOCAL_ENDPOINT}}"
-  method: /scylla.broker.v1.Broker/Publish
+  method: /hermes.broker.v1.Broker/Publish
   methodType: client-streaming
   message: |-
     {

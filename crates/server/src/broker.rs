@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use scylla_broker_core::{DEBUG_QUEUE_GROUP_HEADER, Subject};
-use scylla_broker_proto::{DurableServerMessage, EventEnvelope};
-use scylla_broker_store::{MessageStore, StoreError};
+use hermes_core::{DEBUG_QUEUE_GROUP_HEADER, Subject};
+use hermes_proto::{DurableServerMessage, EventEnvelope};
+use hermes_store::{MessageStore, StoreError};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -363,7 +363,7 @@ impl BrokerEngine {
             }
 
             let msg = DurableServerMessage {
-                msg: Some(scylla_broker_proto::durable_server_message::Msg::Envelope(
+                msg: Some(hermes_proto::durable_server_message::Msg::Envelope(
                     envelope.clone(),
                 )),
             };
@@ -454,8 +454,8 @@ impl BrokerEngine {
             let msg = if stored.attempt > 1 {
                 DurableServerMessage {
                     msg: Some(
-                        scylla_broker_proto::durable_server_message::Msg::Redelivery(
-                            scylla_broker_proto::Redelivery {
+                        hermes_proto::durable_server_message::Msg::Redelivery(
+                            hermes_proto::Redelivery {
                                 envelope: Some(stored.envelope),
                                 attempt: stored.attempt,
                             },
@@ -465,7 +465,7 @@ impl BrokerEngine {
             } else {
                 DurableServerMessage {
                     msg: Some(
-                        scylla_broker_proto::durable_server_message::Msg::Envelope(
+                        hermes_proto::durable_server_message::Msg::Envelope(
                             stored.envelope,
                         ),
                     ),

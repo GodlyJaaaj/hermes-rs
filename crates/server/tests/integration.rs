@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures::StreamExt;
-use scylla_broker_client::ScyllaBrokerClient;
-use scylla_broker_core::{Event, event_group};
+use hermes_client::HermesClient;
+use hermes_core::{Event, event_group};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
@@ -35,7 +35,7 @@ async fn start_broker() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        scylla_broker_server::run(listener).await.unwrap();
+        hermes_server::run(listener).await.unwrap();
     });
 
     // Give the server a moment to start
@@ -54,8 +54,8 @@ async fn test_publish_subscribe_single_event() {
     let addr = start_broker().await;
     let uri = addr_to_uri(addr);
 
-    let publisher = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let subscriber = ScyllaBrokerClient::connect(&uri).await.unwrap();
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber = HermesClient::connect(&uri).await.unwrap();
 
     let mut stream = subscriber.subscribe::<UserCreated>(&[]).await.unwrap();
 
@@ -82,9 +82,9 @@ async fn test_fanout_multiple_subscribers() {
     let addr = start_broker().await;
     let uri = addr_to_uri(addr);
 
-    let publisher = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let sub1 = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let sub2 = ScyllaBrokerClient::connect(&uri).await.unwrap();
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let sub1 = HermesClient::connect(&uri).await.unwrap();
+    let sub2 = HermesClient::connect(&uri).await.unwrap();
 
     let mut stream1 = sub1.subscribe::<UserCreated>(&[]).await.unwrap();
     let mut stream2 = sub2.subscribe::<UserCreated>(&[]).await.unwrap();
@@ -117,9 +117,9 @@ async fn test_queue_group() {
     let addr = start_broker().await;
     let uri = addr_to_uri(addr);
 
-    let publisher = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let sub1 = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let sub2 = ScyllaBrokerClient::connect(&uri).await.unwrap();
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let sub1 = HermesClient::connect(&uri).await.unwrap();
+    let sub2 = HermesClient::connect(&uri).await.unwrap();
 
     let mut stream1 = sub1.subscribe::<UserCreated>(&["workers"]).await.unwrap();
     let mut stream2 = sub2.subscribe::<UserCreated>(&["workers"]).await.unwrap();
@@ -149,8 +149,8 @@ async fn test_enum_event() {
     let addr = start_broker().await;
     let uri = addr_to_uri(addr);
 
-    let publisher = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let subscriber = ScyllaBrokerClient::connect(&uri).await.unwrap();
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber = HermesClient::connect(&uri).await.unwrap();
 
     let mut stream = subscriber.subscribe::<OrderEvent>(&[]).await.unwrap();
 
@@ -176,8 +176,8 @@ async fn test_event_group() {
     let addr = start_broker().await;
     let uri = addr_to_uri(addr);
 
-    let publisher = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let subscriber = ScyllaBrokerClient::connect(&uri).await.unwrap();
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber = HermesClient::connect(&uri).await.unwrap();
 
     let mut stream = subscriber.subscribe_group::<UserEvents>(&[]).await.unwrap();
 
@@ -233,8 +233,8 @@ async fn test_batch_publisher() {
     let addr = start_broker().await;
     let uri = addr_to_uri(addr);
 
-    let client = ScyllaBrokerClient::connect(&uri).await.unwrap();
-    let sub = ScyllaBrokerClient::connect(&uri).await.unwrap();
+    let client = HermesClient::connect(&uri).await.unwrap();
+    let sub = HermesClient::connect(&uri).await.unwrap();
 
     let mut stream = sub.subscribe::<UserCreated>(&[]).await.unwrap();
 

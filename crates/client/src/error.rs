@@ -9,10 +9,10 @@ pub enum ClientError {
     Rpc(#[from] tonic::Status),
 
     #[error("encode: {0}")]
-    Encode(#[from] scylla_broker_core::EncodeError),
+    Encode(#[from] hermes_core::EncodeError),
 
     #[error("decode: {0}")]
-    Decode(#[from] scylla_broker_core::DecodeError),
+    Decode(#[from] hermes_core::DecodeError),
 
     #[error("channel closed")]
     ChannelClosed,

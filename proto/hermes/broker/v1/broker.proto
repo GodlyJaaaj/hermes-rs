@@ -1,5 +1,5 @@
 syntax = "proto3";
-package scylla.broker.v1;
+package hermes.broker.v1;
 
 service Broker {
   // Fire-and-forget: client-streaming publish, ack at stream close

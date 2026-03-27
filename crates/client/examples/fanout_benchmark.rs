@@ -1,18 +1,20 @@
 //! Fanout benchmark: send n messages to n fanout subscribers and measure scaling.
 //!
-//! By default this starts an embedded broker.
-//! You can also target an external broker with `--uri http://127.0.0.1:4222`.
+//! Uses `batch_publisher` (single gRPC stream) for high-throughput publishing.
+//! Build with `--release` for realistic numbers:
 //!
-//! Example:
-//!   cargo run -p scylla-broker-client --example fanout_benchmark -- --n-list 1,2,4,8,16
+//!   cargo run --release -p hermes-client --example fanout_benchmark -- --n-list 10,100,1000
+//!
+//! Use `--uri` for an external broker:
+//!   cargo run --release -p hermes-client --example fanout_benchmark -- --uri http://127.0.0.1:4222 --n-list 1000
 
 use std::env;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use scylla_broker_client::ScyllaBrokerClient;
-use scylla_broker_core::Subject;
+use hermes_client::HermesClient;
+use hermes_core::Subject;
 use tokio::net::TcpListener;
 
 #[derive(Debug, Clone)]
@@ -59,7 +61,7 @@ impl BenchRow {
 fn parse_config() -> Config {
     let mut uri = None;
     let mut n_list = vec![1, 2, 4, 8, 16, 32];
-    let mut timeout_secs = 20_u64;
+    let mut timeout_secs = 30_u64;
     let mut setup_delay_ms = 120_u64;
 
     let args: Vec<String> = env::args().collect();
@@ -92,7 +94,7 @@ fn parse_config() -> Config {
             }
             "--timeout-secs" => {
                 if i + 1 < args.len() {
-                    timeout_secs = args[i + 1].parse::<u64>().unwrap_or(20);
+                    timeout_secs = args[i + 1].parse::<u64>().unwrap_or(30);
                     i += 2;
                 } else {
                     eprintln!("Missing value for --timeout-secs");
@@ -151,37 +153,37 @@ async fn start_embedded_broker() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        scylla_broker_server::run(listener).await.unwrap();
+        hermes_server::run(listener).await.unwrap();
     });
     tokio::time::sleep(Duration::from_millis(60)).await;
     addr
 }
 
-async fn run_one(client: &ScyllaBrokerClient, n: usize, cfg: &Config) -> BenchRow {
+async fn run_one(client: &HermesClient, n: usize, cfg: &Config) -> BenchRow {
     let messages = n;
     let clients = n;
     let expected_deliveries = messages * clients;
 
-    let subject = format!("bench.fanout.{n}.{}", uuid::Uuid::now_v7());
-    let subject_json = Subject::from(subject.as_str()).to_json();
+    let subject_str = format!("bench.fanout.{n}.{}", uuid::Uuid::now_v7());
+    let subject = Subject::from(subject_str.as_str());
+    let subject_json = subject.to_json();
 
+    // --- Set up subscribers ---
     let mut handles = Vec::with_capacity(clients);
 
     for _ in 0..clients {
         let c = client.clone();
-        let subject_json_cloned = subject_json.clone();
+        let sj = subject_json.clone();
         handles.push(tokio::spawn(async move {
             let mut stream = c
-                .subscribe_raw(&subject_json_cloned, &[])
+                .subscribe_raw(&sj, &[])
                 .await
                 .map_err(|e| format!("subscribe_raw error: {e}"))?;
 
             let mut count = 0_usize;
             while count < messages {
                 match stream.next().await {
-                    Some(Ok(_env)) => {
-                        count += 1;
-                    }
+                    Some(Ok(_)) => count += 1,
                     Some(Err(e)) => return Err(format!("stream recv error: {e}")),
                     None => break,
                 }
@@ -192,35 +194,39 @@ async fn run_one(client: &ScyllaBrokerClient, n: usize, cfg: &Config) -> BenchRo
 
     tokio::time::sleep(Duration::from_millis(cfg.setup_delay_ms)).await;
 
-    let publish_subject = Subject::from(subject.as_str());
+    // --- Publish via batch (single gRPC stream) ---
     let start = Instant::now();
 
-    for i in 0..messages {
-        if let Err(e) = client.publish_raw(&publish_subject, b"x".to_vec()).await {
-            eprintln!("publish error at message {i}: {e}");
+    let batch = client.batch_publisher();
+    for _ in 0..messages {
+        if let Err(e) = batch.send_raw(&subject, b"x".to_vec()).await {
+            eprintln!("batch send error: {e}");
             break;
         }
     }
+    // Flush closes the stream and waits for the server ack.
+    match batch.flush().await {
+        Ok(ack) => {
+            if ack.accepted != messages as u64 {
+                eprintln!(
+                    "warning: server accepted {} of {} messages",
+                    ack.accepted, messages
+                );
+            }
+        }
+        Err(e) => eprintln!("batch flush error: {e}"),
+    }
 
+    // --- Wait for all subscribers ---
     let timeout = Duration::from_secs(cfg.timeout_secs);
     let mut received_deliveries = 0_usize;
 
     for handle in handles {
         match tokio::time::timeout(timeout, handle).await {
-            Ok(joined) => match joined {
-                Ok(Ok(count)) => {
-                    received_deliveries += count;
-                }
-                Ok(Err(err)) => {
-                    eprintln!("subscriber task error: {err}");
-                }
-                Err(join_err) => {
-                    eprintln!("subscriber join error: {join_err}");
-                }
-            },
-            Err(_) => {
-                eprintln!("subscriber timeout after {}s", cfg.timeout_secs);
-            }
+            Ok(Ok(Ok(count))) => received_deliveries += count,
+            Ok(Ok(Err(err))) => eprintln!("subscriber task error: {err}"),
+            Ok(Err(join_err)) => eprintln!("subscriber join error: {join_err}"),
+            Err(_) => eprintln!("subscriber timeout after {}s", cfg.timeout_secs),
         }
     }
 
@@ -235,11 +241,9 @@ async fn run_one(client: &ScyllaBrokerClient, n: usize, cfg: &Config) -> BenchRo
 fn print_table(rows: &[BenchRow]) {
     println!();
     println!(
-        "| n (messages=clients) | expected deliveries | received deliveries | completion | elapsed ms | deliveries/s | publish/s |"
+        "| n (msgs=subs) | expected | received | completion | elapsed ms | deliveries/s | publish/s |"
     );
-    println!(
-        "|---:|---:|---:|---:|---:|---:|---:|"
-    );
+    println!("|---:|---:|---:|---:|---:|---:|---:|");
 
     for row in rows {
         println!(
@@ -270,7 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         uri
     };
 
-    let client = ScyllaBrokerClient::connect(uri).await?;
+    let client = HermesClient::connect(uri).await?;
 
     let mut rows = Vec::with_capacity(cfg.n_list.len());
     for n in &cfg.n_list {
@@ -282,4 +286,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_table(&rows);
     Ok(())
 }
-

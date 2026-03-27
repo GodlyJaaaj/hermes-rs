@@ -1,7 +1,7 @@
 use futures::{Stream, StreamExt};
-use scylla_broker_core::{Event, EventGroup, Subject};
-use scylla_broker_proto::broker_client::BrokerClient;
-use scylla_broker_proto::{EventEnvelope, SubscribeRequest};
+use hermes_core::{Event, EventGroup, Subject};
+use hermes_proto::broker_client::BrokerClient;
+use hermes_proto::{EventEnvelope, SubscribeRequest};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -12,15 +12,15 @@ use crate::error::ClientError;
 use crate::publisher::{BatchPublisher, make_envelope};
 use crate::subscriber;
 
-/// Typed client for the scylla-broker.
+/// Typed client for the hermes.
 #[derive(Clone)]
-pub struct ScyllaBrokerClient {
+pub struct HermesClient {
     inner: BrokerClient<Channel>,
     uri: String,
 }
 
-impl ScyllaBrokerClient {
-    /// Connect to a scylla-broker server.
+impl HermesClient {
+    /// Connect to a hermes server.
     pub async fn connect(addr: impl Into<String>) -> Result<Self, ClientError> {
         let uri = addr.into();
         let inner = BrokerClient::connect(uri.clone()).await?;
@@ -66,7 +66,7 @@ impl ScyllaBrokerClient {
 
     /// Create a BatchPublisher for high-throughput publishing.
     pub fn batch_publisher(&self) -> BatchPublisher {
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(8192);
         let mut client = self.inner.clone();
 
         let handle = tokio::spawn(async move {

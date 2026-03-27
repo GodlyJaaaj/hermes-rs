@@ -1,11 +1,11 @@
 //! Queue group example — load-balanced consumption.
 //!
-//! 1. Start the broker: `cargo run -p scylla-broker-server`
-//! 2. In another terminal: `cargo run -p scylla-broker-client --example queue_group`
+//! 1. Start the broker: `cargo run -p hermes-server`
+//! 2. In another terminal: `cargo run -p hermes-client --example queue_group`
 
 use futures::StreamExt;
-use scylla_broker_client::ScyllaBrokerClient;
-use scylla_broker_core::Event;
+use hermes_client::HermesClient;
+use hermes_core::Event;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Event)]
@@ -16,7 +16,7 @@ struct Task {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ScyllaBrokerClient::connect("http://127.0.0.1:4222").await?;
+    let client = HermesClient::connect("http://127.0.0.1:4222").await?;
 
     // Spawn 3 workers in the same queue group
     for worker_id in 0..3 {

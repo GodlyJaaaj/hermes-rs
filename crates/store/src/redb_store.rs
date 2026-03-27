@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use scylla_broker_proto::EventEnvelope;
+use hermes_proto::EventEnvelope;
 use tracing::debug;
 
 use crate::error::StoreError;

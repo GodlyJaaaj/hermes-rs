@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use scylla_broker_proto::{
+use hermes_proto::{
     DurableClientMessage, DurableServerMessage, EventEnvelope, PublishAck, PublishDurableAck,
     SubscribeRequest, broker_server::Broker, durable_client_message::Msg as ClientMsg,
 };
@@ -68,7 +68,7 @@ impl Broker for BrokerService {
 
         let (id, receiver) = self.engine.subscribe(req.subject.clone(), req.queue_groups);
 
-        let (tx_out, rx_out) = tokio::sync::mpsc::channel(self.config.subscriber_channel_capacity);
+        let (tx_out, rx_out) = tokio::sync::mpsc::channel(self.config.grpc_output_buffer);
         let subject = req.subject.clone();
         let engine = self.engine.clone();
 
@@ -130,7 +130,7 @@ impl Broker for BrokerService {
     ) -> Result<Response<PublishDurableAck>, Status> {
         if self.engine.store().is_none() {
             return Err(Status::failed_precondition(
-                "durable mode not enabled: configure SCYLLA_STORE_PATH",
+                "durable mode not enabled: configure HERMES_STORE_PATH",
             ));
         }
 
@@ -178,7 +178,7 @@ impl Broker for BrokerService {
     ) -> Result<Response<Self::SubscribeDurableStream>, Status> {
         if self.engine.store().is_none() {
             return Err(Status::failed_precondition(
-                "durable mode not enabled: configure SCYLLA_STORE_PATH",
+                "durable mode not enabled: configure HERMES_STORE_PATH",
             ));
         }
 

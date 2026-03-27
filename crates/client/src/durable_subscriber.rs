@@ -1,5 +1,5 @@
-use scylla_broker_core::{Event, Subject};
-use scylla_broker_proto::{
+use hermes_core::{Event, Subject};
+use hermes_proto::{
     Ack, DurableClientMessage, DurableSubscribeRequest, Nack, broker_client::BrokerClient,
     durable_client_message::Msg as ClientMsg, durable_server_message::Msg as ServerMsg,
 };
@@ -112,7 +112,7 @@ pub(crate) async fn subscribe_durable<E: Event>(
             };
 
             let message_id = envelope.id.clone();
-            let decoded = match scylla_broker_core::decode::<E>(&envelope.payload) {
+            let decoded = match hermes_core::decode::<E>(&envelope.payload) {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = msg_tx.send(Err(ClientError::Decode(e))).await;

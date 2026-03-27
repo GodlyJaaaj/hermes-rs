@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use scylla_broker_proto::broker_server::BrokerServer;
-use scylla_broker_server::broker::BrokerEngine;
-use scylla_broker_server::config::ServerConfig;
-use scylla_broker_server::grpc::BrokerService;
-use scylla_broker_store::{MessageStore, RedbMessageStore};
+use hermes_proto::broker_server::BrokerServer;
+use hermes_server::broker::BrokerEngine;
+use hermes_server::config::ServerConfig;
+use hermes_server::grpc::BrokerService;
+use hermes_store::{MessageStore, RedbMessageStore};
 use tonic::transport::Server;
 use tracing::info;
 
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(?path, "durable store opened");
         Some(Arc::new(store))
     } else {
-        info!("running in fire-and-forget mode (no SCYLLA_STORE_PATH)");
+        info!("running in fire-and-forget mode (no HERMES_STORE_PATH)");
         None
     };
 
@@ -38,13 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn redelivery + GC loops if durable mode is enabled.
     if let Some(ref store) = store {
-        scylla_broker_server::redelivery::spawn_redelivery_loop(
+        hermes_server::redelivery::spawn_redelivery_loop(
             engine.clone(),
             config.redelivery_interval_secs,
             config.max_delivery_attempts,
             config.redelivery_batch_size,
         );
-        scylla_broker_server::redelivery::spawn_gc_loop(
+        hermes_server::redelivery::spawn_gc_loop(
             store.clone(),
             config.retention_secs,
             config.gc_interval_secs,
@@ -55,10 +55,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = config.listen_addr;
     let service = BrokerService::new(engine, config);
 
-    info!("scylla-broker listening on {listen_addr}");
+    info!("hermes listening on {listen_addr}");
 
     let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(scylla_broker_proto::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(hermes_proto::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
     Server::builder()
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_shutdown(listen_addr, shutdown_signal())
         .await?;
 
-    info!("scylla-broker shut down");
+    info!("hermes shut down");
     Ok(())
 }
 

@@ -29,12 +29,12 @@ pub fn expand_event(input: DeriveInput) -> Result<TokenStream> {
     // Check for custom subject override: #[event(subject = "a.b.c")]
     if let Some(custom) = extract_custom_subject(&input.attrs) {
         return Ok(quote! {
-            impl ::scylla_broker_core::Event for #name {
-                fn subjects() -> ::std::vec::Vec<::scylla_broker_core::Subject> {
-                    ::std::vec![::scylla_broker_core::Subject::from(#custom)]
+            impl ::hermes_core::Event for #name {
+                fn subjects() -> ::std::vec::Vec<::hermes_core::Subject> {
+                    ::std::vec![::hermes_core::Subject::from(#custom)]
                 }
-                fn subject(&self) -> ::scylla_broker_core::Subject {
-                    ::scylla_broker_core::Subject::from(#custom)
+                fn subject(&self) -> ::hermes_core::Subject {
+                    ::hermes_core::Subject::from(#custom)
                 }
             }
         });
@@ -52,18 +52,18 @@ pub fn expand_event(input: DeriveInput) -> Result<TokenStream> {
 
 fn expand_struct_event(name: &syn::Ident, name_str: &str) -> Result<TokenStream> {
     Ok(quote! {
-        impl ::scylla_broker_core::Event for #name {
-            fn subjects() -> ::std::vec::Vec<::scylla_broker_core::Subject> {
+        impl ::hermes_core::Event for #name {
+            fn subjects() -> ::std::vec::Vec<::hermes_core::Subject> {
                 ::std::vec![
-                    ::scylla_broker_core::Subject::from_module_path(
+                    ::hermes_core::Subject::from_module_path(
                         ::std::module_path!(),
                         #name_str,
                     )
                 ]
             }
 
-            fn subject(&self) -> ::scylla_broker_core::Subject {
-                ::scylla_broker_core::Subject::from_module_path(
+            fn subject(&self) -> ::hermes_core::Subject {
+                ::hermes_core::Subject::from_module_path(
                     ::std::module_path!(),
                     #name_str,
                 )
@@ -83,7 +83,7 @@ fn expand_enum_event(
         .map(|v| {
             let vname = v.ident.to_string();
             quote! {
-                ::scylla_broker_core::Subject::from_module_path(
+                ::hermes_core::Subject::from_module_path(
                     ::std::module_path!(),
                     #name_str,
                 ).str(#vname)
@@ -103,7 +103,7 @@ fn expand_enum_event(
                 Fields::Unit => quote! { Self::#vident },
             };
             quote! {
-                #pattern => ::scylla_broker_core::Subject::from_module_path(
+                #pattern => ::hermes_core::Subject::from_module_path(
                     ::std::module_path!(),
                     #name_str,
                 ).str(#vname)
@@ -112,12 +112,12 @@ fn expand_enum_event(
         .collect();
 
     Ok(quote! {
-        impl ::scylla_broker_core::Event for #name {
-            fn subjects() -> ::std::vec::Vec<::scylla_broker_core::Subject> {
+        impl ::hermes_core::Event for #name {
+            fn subjects() -> ::std::vec::Vec<::hermes_core::Subject> {
                 ::std::vec![#(#variant_subjects),*]
             }
 
-            fn subject(&self) -> ::scylla_broker_core::Subject {
+            fn subject(&self) -> ::hermes_core::Subject {
                 match self {
                     #(#match_arms),*
                 }

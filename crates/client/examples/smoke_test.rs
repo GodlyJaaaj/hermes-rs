@@ -11,14 +11,14 @@
 //!   8. Durable pub/sub with ack/nack
 //!
 //! Run:
-//!   cargo run -p scylla-broker-client --example smoke_test
+//!   cargo run -p hermes-client --example smoke_test
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures::StreamExt;
-use scylla_broker_client::ScyllaBrokerClient;
-use scylla_broker_core::{Event, event_group};
+use hermes_client::HermesClient;
+use hermes_core::{Event, event_group};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
@@ -60,7 +60,7 @@ async fn start_broker() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        scylla_broker_server::run(listener).await.unwrap();
+        hermes_server::run(listener).await.unwrap();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     addr
@@ -69,14 +69,14 @@ async fn start_broker() -> SocketAddr {
 async fn start_durable_broker() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let mut config = scylla_broker_server::config::ServerConfig::default();
+    let mut config = hermes_server::config::ServerConfig::default();
     let tmp = tempfile::NamedTempFile::new().unwrap();
     config.store_path = Some(tmp.path().to_path_buf());
     config.redelivery_interval_secs = 1;
     config.default_ack_timeout_secs = 2;
     tokio::spawn(async move {
         let _tmp = tmp; // keep the tempfile alive
-        scylla_broker_server::run_with_config(listener, config)
+        hermes_server::run_with_config(listener, config)
             .await
             .unwrap();
     });
@@ -104,7 +104,7 @@ macro_rules! section {
 // Tests
 // ---------------------------------------------------------------------------
 
-async fn test_simple_pubsub(client: &ScyllaBrokerClient) {
+async fn test_simple_pubsub(client: &HermesClient) {
     section!("1. Simple pub/sub (fanout)");
 
     let sub1 = client.clone();
@@ -144,7 +144,7 @@ async fn test_wildcard_note() {
     ok!("Wildcard matching covered by server::broker::tests (*, >, prefix)");
 }
 
-async fn test_queue_group(client: &ScyllaBrokerClient) {
+async fn test_queue_group(client: &HermesClient) {
     section!("3. Queue groups (competing consumers)");
 
     let mut streams = Vec::new();
@@ -186,7 +186,7 @@ async fn test_queue_group(client: &ScyllaBrokerClient) {
     ));
 }
 
-async fn test_multiple_queue_groups(client: &ScyllaBrokerClient) {
+async fn test_multiple_queue_groups(client: &HermesClient) {
     section!("4. Multiple queue groups");
 
     // sub1 is in both "processors" and "auditors"
@@ -241,7 +241,7 @@ async fn test_multiple_queue_groups(client: &ScyllaBrokerClient) {
     ok!(format!("2 groups dispatched independently (total={total})"));
 }
 
-async fn test_fanout_plus_queue_group(client: &ScyllaBrokerClient) {
+async fn test_fanout_plus_queue_group(client: &HermesClient) {
     section!("5. Fanout + queue group coexistence");
 
     // Observer (fanout — gets everything)
@@ -279,7 +279,7 @@ async fn test_fanout_plus_queue_group(client: &ScyllaBrokerClient) {
     ok!("Observer got it + exactly 1 worker got it");
 }
 
-async fn test_batch_publish(client: &ScyllaBrokerClient) {
+async fn test_batch_publish(client: &HermesClient) {
     section!("6. Batch publishing");
 
     let sub = client.clone();
@@ -313,7 +313,7 @@ async fn test_batch_publish(client: &ScyllaBrokerClient) {
     ok!(format!("All {count} messages received by subscriber"));
 }
 
-async fn test_event_group(client: &ScyllaBrokerClient) {
+async fn test_event_group(client: &HermesClient) {
     section!("7. Event groups (heterogeneous subscription)");
 
     let sub = client.clone();
@@ -372,7 +372,7 @@ async fn test_durable_pubsub() {
     section!("8. Durable pub/sub with ack");
 
     let addr = start_durable_broker().await;
-    let client = ScyllaBrokerClient::connect(uri(addr)).await.unwrap();
+    let client = HermesClient::connect(uri(addr)).await.unwrap();
 
     let sub = client.clone();
     let mut durable = sub
@@ -433,13 +433,13 @@ async fn test_durable_pubsub() {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\x1b[1;33m╔══════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[1;33m║   Scylla Broker — Smoke Test Suite   ║\x1b[0m");
+    println!("\x1b[1;33m║   Hermes — Smoke Test Suite   ║\x1b[0m");
     println!("\x1b[1;33m╚══════════════════════════════════════╝\x1b[0m");
 
     // Start embedded broker (fire-and-forget mode)
     let addr = start_broker().await;
     println!("\nBroker started on {addr}");
-    let client = ScyllaBrokerClient::connect(uri(addr)).await?;
+    let client = HermesClient::connect(uri(addr)).await?;
 
     test_simple_pubsub(&client).await;
     test_wildcard_note().await;

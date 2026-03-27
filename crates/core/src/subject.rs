@@ -117,7 +117,7 @@ impl fmt::Display for Segment {
 /// and/or `>`). The wire format is a flat JSON array:
 ///
 /// ```
-/// # use scylla_broker_core::Subject;
+/// # use hermes_core::Subject;
 /// // Concrete:
 /// let s = Subject::new().str("job").int(42).str("logs");
 /// assert_eq!(s.to_json(), r#"["job",42,"logs"]"#);

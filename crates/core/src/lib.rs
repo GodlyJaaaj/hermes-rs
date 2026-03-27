@@ -9,10 +9,10 @@ pub use group::EventGroup;
 pub use subject::{Segment, Subject};
 
 // Re-export the derive macro
-pub use scylla_broker_macros::Event;
+pub use hermes_macros::Event;
 
 /// Debug header set by the broker when a message is delivered through a queue group.
-pub const DEBUG_QUEUE_GROUP_HEADER: &str = "x-scylla-debug-queue-group";
+pub const DEBUG_QUEUE_GROUP_HEADER: &str = "x-hermes-debug-queue-group";
 
 /// Encode an event to bytes using bincode (serde compat).
 pub fn encode<E: serde::Serialize>(event: &E) -> Result<Vec<u8>, EncodeError> {

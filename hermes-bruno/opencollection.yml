@@ -1,7 +1,7 @@
 opencollection: 1.0.0
 
 info:
-  name: scylla-broker-bruno
+  name: hermes-bruno
 bundled: false
 extensions:
   bruno:

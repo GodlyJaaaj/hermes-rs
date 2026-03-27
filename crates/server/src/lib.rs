@@ -6,8 +6,8 @@ pub mod subscription;
 
 use std::sync::Arc;
 
-use scylla_broker_proto::broker_server::BrokerServer;
-use scylla_broker_store::RedbMessageStore;
+use hermes_proto::broker_server::BrokerServer;
+use hermes_store::RedbMessageStore;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tracing::info;
@@ -23,7 +23,7 @@ pub async fn run_with_config(
     listener: TcpListener,
     config: config::ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store: Option<Arc<dyn scylla_broker_store::MessageStore>> =
+    let store: Option<Arc<dyn hermes_store::MessageStore>> =
         if let Some(ref path) = config.store_path {
             let store = RedbMessageStore::open(path)?;
             info!(?path, "durable store opened");
@@ -63,7 +63,7 @@ pub async fn run_with_config(
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(scylla_broker_proto::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(hermes_proto::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
     Server::builder()

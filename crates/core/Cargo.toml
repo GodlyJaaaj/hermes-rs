@@ -1,10 +1,10 @@
 [package]
-name = "scylla-broker-core"
+name = "hermes-core"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scylla-broker-macros = { path = "../macros" }
+hermes-macros = { path = "../macros" }
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }

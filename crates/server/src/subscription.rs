@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use scylla_broker_proto::EventEnvelope;
+use hermes_proto::EventEnvelope;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 

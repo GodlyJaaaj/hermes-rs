@@ -1,6 +1,6 @@
 use futures::stream::{self, Stream, StreamExt};
-use scylla_broker_core::{Event, EventGroup, Subject};
-use scylla_broker_proto::{SubscribeRequest, broker_client::BrokerClient};
+use hermes_core::{Event, EventGroup, Subject};
+use hermes_proto::{SubscribeRequest, broker_client::BrokerClient};
 use tonic::transport::Channel;
 
 use crate::error::ClientError;
@@ -28,7 +28,7 @@ pub(crate) async fn subscribe_event<E: Event>(
 
         let mapped = inner.map(|result| {
             let envelope = result.map_err(ClientError::Rpc)?;
-            scylla_broker_core::decode::<E>(&envelope.payload).map_err(ClientError::Decode)
+            hermes_core::decode::<E>(&envelope.payload).map_err(ClientError::Decode)
         });
 
         streams.push(mapped);
@@ -60,7 +60,7 @@ pub(crate) async fn subscribe_group<G: EventGroup>(
         let mapped = inner.map(move |result| {
             let envelope = result.map_err(ClientError::Rpc)?;
             let subject = Subject::from_json(&envelope.subject).map_err(|e| {
-                ClientError::Decode(scylla_broker_core::DecodeError::InvalidSubject(
+                ClientError::Decode(hermes_core::DecodeError::InvalidSubject(
                     e.to_string(),
                 ))
             })?;

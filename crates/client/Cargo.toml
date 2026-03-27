@@ -1,11 +1,11 @@
 [package]
-name = "scylla-broker-client"
+name = "hermes-client"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scylla-broker-core = { path = "../core" }
-scylla-broker-proto = { path = "../proto" }
+hermes-core = { path = "../core" }
+hermes-proto = { path = "../proto" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -15,8 +15,13 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-scylla-broker-server = { path = "../server" }
-scylla-broker-proto = { path = "../proto" }
+hermes-server = { path = "../server" }
+hermes-proto = { path = "../proto" }
 tempfile = { workspace = true }
+criterion = { workspace = true }
 ratatui = "0.30"
 crossterm = "0.29"
+
+[[bench]]
+name = "grpc_benchmarks"
+harness = false

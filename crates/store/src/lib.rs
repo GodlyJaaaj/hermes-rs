@@ -4,7 +4,7 @@ mod redb_store;
 pub use error::StoreError;
 pub use redb_store::RedbMessageStore;
 
-use scylla_broker_proto::EventEnvelope;
+use hermes_proto::EventEnvelope;
 
 /// A stored message with its delivery metadata.
 #[derive(Debug, Clone)]

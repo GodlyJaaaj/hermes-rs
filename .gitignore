@@ -1,6 +1,3 @@
 .idea
 target
 .claude
-segment_update.md
-repl.*
-fanout_benchmark.README.*

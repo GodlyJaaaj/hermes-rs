@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use scylla_broker_proto::{DurableServerMessage, Redelivery};
-use scylla_broker_store::MessageStore;
+use hermes_proto::{DurableServerMessage, Redelivery};
+use hermes_store::MessageStore;
 use tracing::{debug, error, warn};
 
 use crate::broker::BrokerEngine;
@@ -110,7 +110,7 @@ pub fn spawn_redelivery_loop(
 
                     let msg = DurableServerMessage {
                         msg: Some(
-                            scylla_broker_proto::durable_server_message::Msg::Redelivery(
+                            hermes_proto::durable_server_message::Msg::Redelivery(
                                 Redelivery {
                                     envelope: Some(stored.envelope.clone()),
                                     attempt: stored.attempt,

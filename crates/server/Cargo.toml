@@ -1,12 +1,12 @@
 [package]
-name = "scylla-broker-server"
+name = "hermes-server"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scylla-broker-core = { path = "../core" }
-scylla-broker-proto = { path = "../proto" }
-scylla-broker-store = { path = "../store" }
+hermes-core = { path = "../core" }
+hermes-proto = { path = "../proto" }
+hermes-store = { path = "../store" }
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
 tokio = { workspace = true }
@@ -18,6 +18,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-scylla-broker-client = { path = "../client" }
+hermes-client = { path = "../client" }
 futures = { workspace = true }
 serde = { workspace = true }
+criterion = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "engine_benchmarks"
+harness = false
