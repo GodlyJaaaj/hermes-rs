@@ -15,7 +15,10 @@ pub(crate) async fn subscribe_event<E: Event>(
     let subjects = E::subjects();
     let qg: Vec<String> = queue_groups.iter().map(|s| s.to_string()).collect();
 
-    debug!(subject_count = subjects.len(), "subscribing to event subjects");
+    debug!(
+        subject_count = subjects.len(),
+        "subscribing to event subjects"
+    );
 
     let mut streams = Vec::with_capacity(subjects.len());
 

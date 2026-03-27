@@ -476,7 +476,11 @@ impl MessageStore for RedbMessageStore {
             }
         }
 
-        debug!(consumer_name, count = result.len(), "fetched pending messages");
+        debug!(
+            consumer_name,
+            count = result.len(),
+            "fetched pending messages"
+        );
         Ok(result)
     }
 
@@ -606,7 +610,11 @@ impl MessageStore for RedbMessageStore {
             }
         }
 
-        debug!(consumer_name, count = result.len(), "fetched expired messages");
+        debug!(
+            consumer_name,
+            count = result.len(),
+            "fetched expired messages"
+        );
         Ok(result)
     }
 
