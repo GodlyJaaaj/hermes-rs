@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
 jobs:
   publish:
@@ -15,22 +16,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify tag matches Cargo.toml version
-        run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          if [ "$TAG" != "$CARGO_VERSION" ]; then
-            echo "Tag v$TAG does not match Cargo.toml version $CARGO_VERSION"
-            exit 1
-          fi
+      # Publish in dependency order with sleep to let crates.io index
+      - name: Publish hermes-broker-macros
+        run: cargo publish -p hermes-broker-macros
+      - run: sleep 30
 
-      - name: Dry-run publish
-        run: cargo publish --workspace --dry-run
+      - name: Publish hermes-broker-proto
+        run: cargo publish -p hermes-broker-proto
+      - run: sleep 30
 
-      - name: Publish all crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --workspace
+      - name: Publish hermes-broker-core
+        run: cargo publish -p hermes-broker-core
+      - run: sleep 30
+
+      - name: Publish hermes-broker-store
+        run: cargo publish -p hermes-broker-store
+      - run: sleep 30
+
+      - name: Publish hermes-broker-server
+        run: cargo publish -p hermes-broker-server
+      - run: sleep 30
+
+      - name: Publish hermes-broker-client
+        run: cargo publish -p hermes-broker-client

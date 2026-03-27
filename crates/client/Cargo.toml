@@ -12,8 +12,8 @@ keywords = ["messaging", "broker", "grpc", "event", "pubsub"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-hermes-core = { package = "hermes-broker-core", path = "../core", version = "0.2.0" }
-hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.2.0" }
+hermes-core = { package = "hermes-broker-core", path = "../core", version = "0.3.1" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.3.1" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

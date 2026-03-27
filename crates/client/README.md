@@ -8,8 +8,8 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hermes-broker-client = "0.2"
-hermes-broker-core   = "0.2"
+hermes-broker-client = "0.3"
+hermes-broker-core   = "0.3"
 serde  = { version = "1", features = ["derive"] }
 tokio  = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
@@ -194,12 +194,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Durable subscribe — messages are redelivered until acked
     let mut sub = client
-        .subscribe_durable::<Payment>("payment-processor", 10, 30)
+        .subscribe_durable::<Payment>("payment-processor", &[], 10, 30)
         .await?;
 
     while let Some(msg) = sub.next().await {
-        println!("processing payment: {:?}", msg.payload());
-        msg.ack().await?; // or msg.nack(requeue: true).await?
+        let msg = msg?;
+        println!("processing payment: {:?}", msg.event);
+        msg.ack().await?; // or msg.nack(true).await? to requeue
     }
 
     Ok(())
