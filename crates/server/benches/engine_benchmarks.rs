@@ -279,7 +279,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
             .map(|i| {
                 let sub = Subject::new()
                     .str("other")
-                    .str(&i.to_string())
+                    .str(i.to_string())
                     .rest()
                     .to_json();
                 engine.subscribe(sub, vec![]).1
@@ -297,8 +297,8 @@ fn bench_wildcard_matching(c: &mut Criterion) {
                     black_box(engine.publish(&envelope));
                 }
             }
-            let elapsed = start.elapsed();
-            elapsed
+
+            start.elapsed()
         });
     });
 
@@ -321,7 +321,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for i in 0..num_ops {
-                    let sub = Subject::new().str("churn").str(&i.to_string()).to_json();
+                    let sub = Subject::new().str("churn").str(i.to_string()).to_json();
                     let _ = black_box(engine.subscribe(sub, vec![]));
                 }
             }
@@ -335,7 +335,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for i in 0..num_ops {
-                    let sub_json = Subject::new().str("churn").str(&i.to_string()).to_json();
+                    let sub_json = Subject::new().str("churn").str(i.to_string()).to_json();
                     let (id, _rx) = engine.subscribe(sub_json.clone(), vec![]);
                     engine.unsubscribe(&sub_json, id);
                 }
@@ -391,7 +391,7 @@ fn bench_publish_baseline(c: &mut Criterion) {
             .map(|i| {
                 let sub = Subject::new()
                     .str("noise")
-                    .str(&i.to_string())
+                    .str(i.to_string())
                     .rest()
                     .to_json();
                 engine.subscribe(sub, vec![]).1
@@ -471,7 +471,7 @@ fn bench_lookup_throughput(c: &mut Criterion) {
                 // Create N subscriptions on different exact subjects
                 let _receivers: Vec<SubscriptionReceiver> = (0..n)
                     .map(|i| {
-                        let sub = Subject::new().str("topic").str(&i.to_string()).to_json();
+                        let sub = Subject::new().str("topic").str(i.to_string()).to_json();
                         engine.subscribe(sub, vec![]).1
                     })
                     .collect();
@@ -479,7 +479,7 @@ fn bench_lookup_throughput(c: &mut Criterion) {
                 // Publish to a subject that matches the last subscription
                 let target = Subject::new()
                     .str("topic")
-                    .str(&(n - 1).to_string())
+                    .str((n - 1).to_string())
                     .to_json();
                 let envelope = make_envelope(&target, 64);
 
@@ -520,7 +520,7 @@ fn bench_large_scale_wildcards(c: &mut Criterion) {
                     .map(|i| {
                         let sub = Subject::new()
                             .str("sensor")
-                            .str(&i.to_string())
+                            .str(i.to_string())
                             .any()
                             .to_json();
                         engine.subscribe(sub, vec![]).1

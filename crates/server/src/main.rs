@@ -36,6 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(BrokerEngine::new(config.subscriber_channel_capacity))
     };
 
+    // Token to cancel background loops on shutdown.
+    let cancel = tokio_util::sync::CancellationToken::new();
+
     // Spawn redelivery + GC loops if durable mode is enabled.
     if let Some(ref store) = store {
         hermes_server::redelivery::spawn_redelivery_loop(
@@ -43,11 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.redelivery_interval_secs,
             config.max_delivery_attempts,
             config.redelivery_batch_size,
+            cancel.clone(),
         );
         hermes_server::redelivery::spawn_gc_loop(
             store.clone(),
             config.retention_secs,
             config.gc_interval_secs,
+            cancel.clone(),
         );
         info!("redelivery and GC loops started");
     }
@@ -67,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_shutdown(listen_addr, shutdown_signal())
         .await?;
 
+    cancel.cancel();
     info!("hermes shut down");
     Ok(())
 }

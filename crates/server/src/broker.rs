@@ -19,6 +19,8 @@ use crate::subscription::{
 
 /// Tracks a durable consumer's channel and config.
 pub struct DurableConsumer {
+    /// Unique connection ID to prevent stale unsubscribes from removing a newer consumer.
+    pub connection_id: u64,
     pub consumer_name: String,
     pub subject_json: String,
     pub subject_pattern: Subject,
@@ -387,7 +389,9 @@ impl BrokerEngine {
     // Durable subscribe
     // -----------------------------------------------------------------------
 
-    /// Register a durable consumer. Returns a receiver for messages.
+    /// Register a durable consumer. Returns `(connection_id, receiver)`.
+    /// The `connection_id` must be passed to `unsubscribe_durable` to prevent
+    /// a stale disconnect from removing a newer consumer with the same name.
     pub fn subscribe_durable(
         &self,
         consumer_name: String,
@@ -395,16 +399,18 @@ impl BrokerEngine {
         queue_groups: Vec<String>,
         max_in_flight: u32,
         ack_timeout_secs: u32,
-    ) -> Result<mpsc::Receiver<DurableServerMessage>, StoreError> {
+    ) -> Result<(u64, mpsc::Receiver<DurableServerMessage>), StoreError> {
         let store = self.store.as_ref().ok_or(StoreError::NotConfigured)?;
 
         store.register_consumer(&consumer_name, &subject_json, &queue_groups)?;
 
+        let connection_id = self.rr_counter.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(max_in_flight as usize);
 
         let subject_pattern = Subject::from_json(&subject_json).unwrap_or_else(|_| Subject::new());
 
         let consumer = DurableConsumer {
+            connection_id,
             consumer_name: consumer_name.clone(),
             subject_json: subject_json.clone(),
             subject_pattern,
@@ -420,10 +426,11 @@ impl BrokerEngine {
 
         debug!(
             consumer_name,
+            connection_id,
             subject = subject_json,
             "durable subscription registered"
         );
-        Ok(rx)
+        Ok((connection_id, rx))
     }
 
     fn catch_up_durable(
@@ -465,9 +472,15 @@ impl BrokerEngine {
     }
 
     /// Remove a durable consumer (on disconnect).
-    pub fn unsubscribe_durable(&self, consumer_name: &str) {
-        self.durable_consumers.remove(consumer_name);
-        debug!(consumer_name, "durable consumer disconnected");
+    /// Only removes if the `connection_id` matches the current entry, preventing
+    /// a stale disconnect from removing a newer consumer that reconnected.
+    pub fn unsubscribe_durable(&self, consumer_name: &str, connection_id: u64) {
+        self.durable_consumers
+            .remove_if(consumer_name, |_k, v| v.connection_id == connection_id);
+        debug!(
+            consumer_name,
+            connection_id, "durable consumer disconnected"
+        );
     }
 
     // -----------------------------------------------------------------------

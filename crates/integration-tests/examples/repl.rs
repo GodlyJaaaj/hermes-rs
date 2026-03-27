@@ -877,12 +877,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (key_tx, mut key_rx) = mpsc::channel::<Event>(64);
     std::thread::spawn(move || {
         loop {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(ev) = event::read() {
-                    if key_tx.blocking_send(ev).is_err() {
-                        break;
-                    }
-                }
+            if event::poll(Duration::from_millis(50)).unwrap_or(false)
+                && let Ok(ev) = event::read()
+                && key_tx.blocking_send(ev).is_err()
+            {
+                break;
             }
         }
     });

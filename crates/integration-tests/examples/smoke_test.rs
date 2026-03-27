@@ -167,7 +167,7 @@ async fn test_queue_group(client: &HermesClient) {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let mut counts = vec![0usize; 3];
+    let mut counts = [0usize; 3];
     for (idx, stream) in streams.iter_mut().enumerate() {
         while let Ok(Some(Ok(_))) =
             tokio::time::timeout(Duration::from_millis(50), stream.next()).await

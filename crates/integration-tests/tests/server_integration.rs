@@ -1,11 +1,15 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::StreamExt;
 use hermes_client::HermesClient;
 use hermes_core::{Event, event_group};
+use hermes_server::config::ServerConfig;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 // -- Test event types --
 
@@ -320,4 +324,444 @@ async fn test_custom_subject_fanout_two_clients() {
         assert_eq!(&a, expected, "subscriber A mismatch on alert #{i}");
         assert_eq!(&b, expected, "subscriber B mismatch on alert #{i}");
     }
+}
+
+// -- Durable / persistence helpers --
+
+/// Start a broker with durable store enabled and fast redelivery (1s interval).
+async fn start_durable_broker() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let store_path = tmp_dir.path().join("hermes-test.redb");
+    // Leak the tempdir so it lives as long as the process.
+    std::mem::forget(tmp_dir);
+
+    let cfg = ServerConfig {
+        store_path: Some(store_path),
+        redelivery_interval_secs: 1,
+        default_ack_timeout_secs: 1,
+        max_delivery_attempts: 5,
+        ..ServerConfig::default()
+    };
+
+    tokio::spawn(async move {
+        hermes_server::run_with_config(listener, cfg).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
+// -- Durable persistence tests --
+
+/// Publish durable messages, subscriber connects but does NOT ack,
+/// subscriber disconnects, then reconnects with the same consumer_name.
+/// The unacked messages should be redelivered.
+#[tokio::test]
+async fn test_durable_persistence_redelivery_on_reconnect() {
+    let addr = start_durable_broker().await;
+    let uri = addr_to_uri(addr);
+
+    // Publish 3 durable messages.
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    for i in 0..3 {
+        publisher
+            .publish_durable(&UserCreated {
+                user_id: format!("persist_{i}"),
+                email: format!("user{i}@persist.com"),
+            })
+            .await
+            .unwrap();
+    }
+
+    // First subscriber: connect, receive messages, do NOT ack, then disconnect.
+    {
+        let sub_client = HermesClient::connect(&uri).await.unwrap();
+        let mut durable = sub_client
+            .subscribe_durable::<UserCreated>("test-consumer-1", &[], 10, 1)
+            .await
+            .unwrap();
+
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            let msg = tokio::time::timeout(Duration::from_secs(3), durable.next())
+                .await
+                .expect("timeout waiting for durable message")
+                .expect("stream ended");
+            let msg = msg.expect("decode error");
+            received.push(msg.event.user_id.clone());
+            // Intentionally NOT calling msg.ack()
+        }
+        assert_eq!(received.len(), 3);
+        // durable + sub_client dropped here → subscriber disconnects
+    }
+
+    // Wait for ack timeout + redelivery loop to fire.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Second subscriber: reconnect with the SAME consumer name.
+    let sub_client2 = HermesClient::connect(&uri).await.unwrap();
+    let mut durable2 = sub_client2
+        .subscribe_durable::<UserCreated>("test-consumer-1", &[], 10, 30)
+        .await
+        .unwrap();
+
+    // Should receive the 3 messages again (redelivered).
+    let mut redelivered = Vec::new();
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), durable2.next())
+            .await
+            .expect("timeout: message was not redelivered")
+            .expect("stream ended");
+        let msg = msg.expect("decode error");
+        redelivered.push(msg.event.user_id.clone());
+        msg.ack().await.unwrap();
+    }
+
+    redelivered.sort();
+    assert_eq!(redelivered, vec!["persist_0", "persist_1", "persist_2"]);
+}
+
+/// Publish durable, subscriber acks all, disconnects, reconnects
+/// → should receive nothing (messages were acked).
+#[tokio::test]
+async fn test_durable_acked_messages_not_redelivered() {
+    let addr = start_durable_broker().await;
+    let uri = addr_to_uri(addr);
+
+    // Subscribe FIRST so messages are delivered in real-time.
+    let sub_client = HermesClient::connect(&uri).await.unwrap();
+    let mut durable = sub_client
+        .subscribe_durable::<UserCreated>("test-consumer-ack", &[], 10, 30)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    for i in 0..3 {
+        publisher
+            .publish_durable(&UserCreated {
+                user_id: format!("acked_{i}"),
+                email: format!("user{i}@acked.com"),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Receive + ACK all.
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(3), durable.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("decode error");
+        msg.ack().await.unwrap();
+    }
+
+    // Wait for acks to be fully processed server-side before disconnecting.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(durable);
+    drop(sub_client);
+
+    // Wait long enough for the server to fully process the disconnect.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Reconnect → should get nothing.
+    let sub_client2 = HermesClient::connect(&uri).await.unwrap();
+    let mut durable2 = sub_client2
+        .subscribe_durable::<UserCreated>("test-consumer-ack", &[], 10, 30)
+        .await
+        .unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), durable2.next()).await;
+    assert!(
+        result.is_err(),
+        "should NOT receive any message after all were acked"
+    );
+}
+
+/// Test: publish durable BEFORE subscribe → message comes from catch_up_durable.
+#[tokio::test]
+async fn test_durable_catchup_ack() {
+    let addr = start_durable_broker().await;
+    let uri = addr_to_uri(addr);
+
+    // Publish FIRST (no consumer registered yet → message stays Pending).
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    publisher
+        .publish_durable(&UserCreated {
+            user_id: "catchup".into(),
+            email: "catchup@test.com".into(),
+        })
+        .await
+        .unwrap();
+
+    // Subscribe AFTER → catch_up_durable delivers the pending message.
+    let sub_client = HermesClient::connect(&uri).await.unwrap();
+    let mut durable = sub_client
+        .subscribe_durable::<UserCreated>("catchup-consumer", &[], 10, 30)
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(3), durable.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("decode error");
+    assert_eq!(msg.event.user_id, "catchup");
+    msg.ack().await.unwrap();
+}
+
+/// Minimal test: durable pub/sub with ack to verify the basic flow works.
+#[tokio::test]
+async fn test_durable_basic_ack() {
+    let addr = start_durable_broker().await;
+    let uri = addr_to_uri(addr);
+
+    let client = HermesClient::connect(&uri).await.unwrap();
+    let mut durable = client
+        .subscribe_durable::<UserCreated>("basic-ack-consumer", &[], 10, 30)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    publisher
+        .publish_durable(&UserCreated {
+            user_id: "basic".into(),
+            email: "basic@test.com".into(),
+        })
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(3), durable.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("decode error");
+    assert_eq!(msg.event.user_id, "basic");
+    msg.ack().await.unwrap();
+}
+
+/// Nack with requeue=true → message goes back to Pending.
+/// On reconnect the consumer gets it again via catch_up_durable.
+#[tokio::test]
+async fn test_durable_nack_requeue() {
+    let addr = start_durable_broker().await;
+    let uri = addr_to_uri(addr);
+
+    // Subscribe FIRST so the message is delivered in real-time.
+    let sub_client = HermesClient::connect(&uri).await.unwrap();
+    let mut durable = sub_client
+        .subscribe_durable::<UserCreated>("test-consumer-nack", &[], 10, 30)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    publisher
+        .publish_durable(&UserCreated {
+            user_id: "nack_me".into(),
+            email: "nack@test.com".into(),
+        })
+        .await
+        .unwrap();
+
+    // Receive and NACK with requeue.
+    let msg = tokio::time::timeout(Duration::from_secs(3), durable.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("decode error");
+    assert_eq!(msg.event.user_id, "nack_me");
+    msg.nack(true).await.unwrap();
+
+    // Wait for nack to be processed, then disconnect.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(durable);
+    drop(sub_client);
+
+    // Wait long enough for the server to fully process the disconnect
+    // (unsubscribe_durable) before reconnecting with the same consumer name.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Reconnect → catch_up_durable should redeliver the nacked message.
+    let sub_client2 = HermesClient::connect(&uri).await.unwrap();
+    let mut durable2 = sub_client2
+        .subscribe_durable::<UserCreated>("test-consumer-nack", &[], 10, 30)
+        .await
+        .unwrap();
+
+    let msg2 = tokio::time::timeout(Duration::from_secs(5), durable2.next())
+        .await
+        .expect("timeout: nacked message was not redelivered on reconnect")
+        .expect("stream ended")
+        .expect("decode error");
+    assert_eq!(msg2.event.user_id, "nack_me");
+    msg2.ack().await.unwrap();
+}
+
+// -- Server restart persistence test --
+
+/// A running durable broker that can be gracefully shut down.
+struct DurableBrokerHandle {
+    addr: SocketAddr,
+    store_path: PathBuf,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl DurableBrokerHandle {
+    fn uri(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Gracefully shut down the server and wait for it to fully stop
+    /// (including releasing the redb file lock).
+    async fn shutdown(self) {
+        self.cancel.cancel();
+        // Wait for the server task to finish — this ensures the store is released.
+        let _ = self.task.await;
+    }
+}
+
+/// Start a durable broker with graceful shutdown support.
+async fn start_durable_broker_with_shutdown() -> DurableBrokerHandle {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let store_path = tmp_dir.path().join("hermes-restart.redb");
+    std::mem::forget(tmp_dir);
+
+    start_broker_on(addr, listener, store_path).await
+}
+
+/// Restart a broker on a new port, reusing the same store file.
+async fn restart_broker_with_store(store_path: PathBuf) -> DurableBrokerHandle {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    start_broker_on(addr, listener, store_path).await
+}
+
+async fn start_broker_on(
+    addr: SocketAddr,
+    listener: TcpListener,
+    store_path: PathBuf,
+) -> DurableBrokerHandle {
+    let cfg = ServerConfig {
+        store_path: Some(store_path.clone()),
+        redelivery_interval_secs: 1,
+        default_ack_timeout_secs: 1,
+        max_delivery_attempts: 5,
+        ..ServerConfig::default()
+    };
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    let task = tokio::spawn(async move {
+        hermes_server::run_with_shutdown(listener, cfg, cancel_clone.cancelled())
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    DurableBrokerHandle {
+        addr,
+        store_path,
+        cancel,
+        task,
+    }
+}
+
+/// Full server restart test:
+/// 1. Start server, publish durable messages, subscriber receives but does NOT ack
+/// 2. Shut down the server (graceful shutdown)
+/// 3. Restart with the SAME store file on a new port
+/// 4. Subscriber reconnects → should receive all unacked messages
+#[tokio::test]
+async fn test_durable_persistence_survives_server_restart() {
+    // Phase 1: Start server, publish, receive without ack.
+    let handle = start_durable_broker_with_shutdown().await;
+    let store_path = handle.store_path.clone();
+    let uri1 = handle.uri();
+
+    // Subscribe first so messages are delivered in real-time.
+    // Use ack_timeout=1s so messages expire quickly after the server restarts.
+    let sub_client = HermesClient::connect(&uri1).await.unwrap();
+    let mut durable = sub_client
+        .subscribe_durable::<UserCreated>("restart-consumer", &[], 10, 1)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let publisher = HermesClient::connect(&uri1).await.unwrap();
+    for i in 0..3 {
+        publisher
+            .publish_durable(&UserCreated {
+                user_id: format!("restart_{i}"),
+                email: format!("restart{i}@test.com"),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Receive all 3 messages but do NOT ack.
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(3), durable.next())
+            .await
+            .expect("timeout waiting for message")
+            .expect("stream ended")
+            .expect("decode error");
+        received.push(msg.event.user_id.clone());
+        // Intentionally NOT acking.
+    }
+    assert_eq!(received.len(), 3);
+
+    // Phase 2: Drop clients, then gracefully shut down the server.
+    // Drop clients first to close gRPC connections cleanly.
+    drop(durable);
+    drop(sub_client);
+    drop(publisher);
+    // Shut down and WAIT for the server to fully stop (releases redb lock).
+    handle.shutdown().await;
+
+    // Phase 3: Restart with the SAME store file on a new port.
+    let handle2 = restart_broker_with_store(store_path).await;
+    let uri2 = handle2.uri();
+
+    // Phase 4: Reconnect and verify messages are redelivered from disk.
+    let sub_client2 = HermesClient::connect(&uri2).await.unwrap();
+    let mut durable2 = sub_client2
+        .subscribe_durable::<UserCreated>("restart-consumer", &[], 10, 30)
+        .await
+        .unwrap();
+
+    let mut redelivered = Vec::new();
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), durable2.next())
+            .await
+            .expect("timeout: message was NOT redelivered after server restart")
+            .expect("stream ended")
+            .expect("decode error");
+        redelivered.push(msg.event.user_id.clone());
+        msg.ack().await.unwrap();
+    }
+
+    redelivered.sort();
+    assert_eq!(
+        redelivered,
+        vec!["restart_0", "restart_1", "restart_2"],
+        "all 3 messages should survive server restart"
+    );
 }

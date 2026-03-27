@@ -67,24 +67,39 @@ pub mod grpc;
 pub mod redelivery;
 pub mod subscription;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use hermes_proto::broker_server::BrokerServer;
 use hermes_store::RedbMessageStore;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tracing::info;
 
-/// Run the broker server on the given listener.
+/// Run the broker server on the given listener (runs until the process is killed).
 /// Useful for integration tests that need a server on a random port.
 pub async fn run(listener: TcpListener) -> Result<(), Box<dyn std::error::Error>> {
     run_with_config(listener, config::ServerConfig::default()).await
 }
 
-/// Run the broker server with a specific config.
+/// Run the broker server with a specific config (runs until the process is killed).
 pub async fn run_with_config(
     listener: TcpListener,
     config: config::ServerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // A future that never resolves — the server runs forever.
+    run_with_shutdown(listener, config, std::future::pending::<()>()).await
+}
+
+/// Run the broker server with graceful shutdown.
+///
+/// The server will stop accepting new connections when `shutdown` resolves,
+/// and will finish processing in-flight requests before returning.
+pub async fn run_with_shutdown(
+    listener: TcpListener,
+    config: config::ServerConfig,
+    shutdown: impl Future<Output = ()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store: Option<Arc<dyn hermes_store::MessageStore>> =
         if let Some(ref path) = config.store_path {
@@ -106,6 +121,9 @@ pub async fn run_with_config(
         ))
     };
 
+    // Token to cancel background loops on shutdown.
+    let cancel = CancellationToken::new();
+
     // Spawn redelivery + GC loops if store is enabled.
     if let Some(ref store) = store {
         redelivery::spawn_redelivery_loop(
@@ -113,11 +131,13 @@ pub async fn run_with_config(
             config.redelivery_interval_secs,
             config.max_delivery_attempts,
             config.redelivery_batch_size,
+            cancel.clone(),
         );
         redelivery::spawn_gc_loop(
             store.clone(),
             config.retention_secs,
             config.gc_interval_secs,
+            cancel.clone(),
         );
     }
 
@@ -132,8 +152,11 @@ pub async fn run_with_config(
     Server::builder()
         .add_service(reflection)
         .add_service(BrokerServer::new(service))
-        .serve_with_incoming(incoming)
+        .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
+
+    // Stop background loops and let them release the store.
+    cancel.cancel();
 
     Ok(())
 }

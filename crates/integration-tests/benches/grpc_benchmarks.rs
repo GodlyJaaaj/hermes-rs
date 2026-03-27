@@ -151,8 +151,8 @@ fn bench_grpc_fanout(c: &mut Criterion) {
                             let subject = Subject::new()
                                 .str("bench")
                                 .str("grpcfan")
-                                .str(&format!("{num_subs}"))
-                                .str(&format!("i{iter_idx}"));
+                                .str(format!("{num_subs}"))
+                                .str(format!("i{iter_idx}"));
                             let subject_json = subject.to_json();
 
                             // Subscribe N clients

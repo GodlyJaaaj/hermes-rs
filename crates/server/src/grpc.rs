@@ -215,7 +215,7 @@ impl Broker for BrokerService {
         };
 
         let consumer_name = sub_req.consumer_name.clone();
-        let rx = self
+        let (connection_id, rx) = self
             .engine
             .subscribe_durable(
                 consumer_name.clone(),
@@ -306,8 +306,11 @@ impl Broker for BrokerService {
 
             // Client disconnected — messages in-flight stay "delivered" and will be redelivered.
             cancel_inbound.cancel();
-            engine.unsubscribe_durable(&consumer_name);
-            debug!(consumer = consumer_name, "durable subscriber disconnected");
+            engine.unsubscribe_durable(&consumer_name, connection_id);
+            debug!(
+                consumer = consumer_name,
+                connection_id, "durable subscriber disconnected"
+            );
         });
 
         Ok(Response::new(ReceiverStream::new(rx_out)))

@@ -3,23 +3,30 @@ use std::time::Duration;
 
 use hermes_proto::{DurableServerMessage, Redelivery};
 use hermes_store::MessageStore;
+use tokio::select;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::broker::BrokerEngine;
 
 /// Spawn the redelivery loop that checks for expired messages and re-delivers them.
+/// The loop stops when `cancel` is triggered.
 pub fn spawn_redelivery_loop(
     engine: Arc<BrokerEngine>,
     interval_secs: u64,
     max_attempts: u32,
     batch_size: u32,
+    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await; // skip the first immediate tick
 
         loop {
-            interval.tick().await;
+            select! {
+                _ = interval.tick() => {}
+                () = cancel.cancelled() => break,
+            }
 
             let store = match engine.store() {
                 Some(s) => s,
@@ -134,21 +141,27 @@ pub fn spawn_redelivery_loop(
                 }
             }
         }
+        debug!("redelivery loop stopped");
     })
 }
 
 /// Spawn the GC loop that cleans up old acked messages.
+/// The loop stops when `cancel` is triggered.
 pub fn spawn_gc_loop(
     store: Arc<dyn MessageStore>,
     retention_secs: u64,
     gc_interval_secs: u64,
+    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(gc_interval_secs));
         interval.tick().await;
 
         loop {
-            interval.tick().await;
+            select! {
+                _ = interval.tick() => {}
+                () = cancel.cancelled() => break,
+            }
 
             let threshold = now_ms().saturating_sub(retention_secs * 1000);
             match store.gc_acked(threshold) {
@@ -157,6 +170,7 @@ pub fn spawn_gc_loop(
                 Err(e) => warn!("gc failed: {e}"),
             }
         }
+        debug!("gc loop stopped");
     })
 }
 
