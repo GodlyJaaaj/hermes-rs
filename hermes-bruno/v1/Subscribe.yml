@@ -9,7 +9,7 @@ grpc:
   methodType: server-streaming
   message: |-
     {
-      "subject": "[\"test\",\"task\"]",
-      "queue_group": "workers"
+      "subject": "vox",
+      "queue_groups": []
     }
   auth: inherit

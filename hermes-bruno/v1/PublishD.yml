@@ -1,21 +1,21 @@
 info:
-  name: Publish
+  name: PublishD
   type: grpc
-  seq: 2
+  seq: 3
 
 grpc:
   url: "{{LOCAL_ENDPOINT}}"
-  method: /hermes.broker.v1.Broker/Publish
+  method: /hermes.broker.v1.Broker/PublishDurable
   methodType: client-streaming
   message: |-
     {
-      "id": "antea",
-      "subject": "vox",
-      "payload": "",
+      "id": "impedit",
+      "subject": "demonstro",
+      "payload": "R1VOaVhadFpRdw==",
       "headers": [
         {}
       ],
-      "timestamp_nanos": 545
+      "timestamp_nanos": 611
     }
   auth: inherit
 

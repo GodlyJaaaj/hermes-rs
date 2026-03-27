@@ -1,0 +1,16 @@
+info:
+  name: SubscribeD
+  type: grpc
+  seq: 4
+
+grpc:
+  url: "{{LOCAL_ENDPOINT}}"
+  method: /hermes.broker.v1.Broker/SubscribeDurable
+  methodType: bidi-streaming
+  message: |-
+    {
+      "subscribe": {},
+      "ack": {},
+      "nack": {}
+    }
+  auth: inherit
