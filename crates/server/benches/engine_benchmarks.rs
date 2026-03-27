@@ -413,6 +413,144 @@ fn bench_publish_baseline(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 7. Large-scale fanout (10K+ subscribers)
+// ---------------------------------------------------------------------------
+
+fn bench_large_scale_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_scale_fanout");
+    group.measurement_time(Duration::from_secs(15));
+    let num_messages: u64 = 500;
+
+    for k in [10_000_u64, 100_000] {
+        group.throughput(Throughput::Elements(num_messages));
+        group.bench_with_input(BenchmarkId::new("subscribers", k), &k, |b, &k| {
+            let engine = BrokerEngine::new(k as usize + 1024);
+            let subject = Subject::new().str("bench").str("largefanout");
+            let subject_json = subject.to_json();
+            let envelope = make_envelope(&subject_json, 128);
+
+            let mut receivers: Vec<SubscriptionReceiver> = (0..k)
+                .map(|_| engine.subscribe(subject_json.clone(), vec![]).1)
+                .collect();
+
+            b.iter_custom(|iters| {
+                let start = std::time::Instant::now();
+                for _ in 0..iters {
+                    for _ in 0..num_messages {
+                        black_box(engine.publish(&envelope));
+                    }
+                }
+                let elapsed = start.elapsed();
+                for rx in &mut receivers {
+                    drain_receiver(rx);
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 8. Lookup throughput (batches of 10K publishes, varying subscriber counts)
+// ---------------------------------------------------------------------------
+
+fn bench_lookup_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lookup_throughput");
+    group.measurement_time(Duration::from_secs(15));
+    let batch: u64 = 10_000;
+
+    for num_subs in [100_u64, 1_000, 10_000, 100_000] {
+        group.throughput(Throughput::Elements(batch));
+        group.bench_with_input(
+            BenchmarkId::new("subscriptions", num_subs),
+            &num_subs,
+            |b, &n| {
+                let engine = BrokerEngine::new(n as usize + 1024);
+
+                // Create N subscriptions on different exact subjects
+                let _receivers: Vec<SubscriptionReceiver> = (0..n)
+                    .map(|i| {
+                        let sub = Subject::new().str("topic").str(&i.to_string()).to_json();
+                        engine.subscribe(sub, vec![]).1
+                    })
+                    .collect();
+
+                // Publish to a subject that matches the last subscription
+                let target = Subject::new()
+                    .str("topic")
+                    .str(&(n - 1).to_string())
+                    .to_json();
+                let envelope = make_envelope(&target, 64);
+
+                b.iter_custom(|iters| {
+                    let start = std::time::Instant::now();
+                    for _ in 0..iters {
+                        for _ in 0..batch {
+                            black_box(engine.publish(&envelope));
+                        }
+                    }
+                    start.elapsed()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 9. Large-scale wildcard matching (many wildcard patterns)
+// ---------------------------------------------------------------------------
+
+fn bench_large_scale_wildcards(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_scale_wildcards");
+    group.measurement_time(Duration::from_secs(15));
+    let num_messages: u64 = 1000;
+
+    for num_patterns in [10_u64, 100, 1000] {
+        group.throughput(Throughput::Elements(num_messages));
+        group.bench_with_input(
+            BenchmarkId::new("wildcard_patterns", num_patterns),
+            &num_patterns,
+            |b, &n| {
+                let engine = BrokerEngine::new(16384);
+
+                // Create N wildcard subscriptions: "sensor.{i}.*"
+                let _receivers: Vec<SubscriptionReceiver> = (0..n)
+                    .map(|i| {
+                        let sub = Subject::new()
+                            .str("sensor")
+                            .str(&i.to_string())
+                            .any()
+                            .to_json();
+                        engine.subscribe(sub, vec![]).1
+                    })
+                    .collect();
+
+                // Publish to a matching subject: "sensor.0.temperature"
+                let pub_subject = Subject::new()
+                    .str("sensor")
+                    .str("0")
+                    .str("temperature")
+                    .to_json();
+                let envelope = make_envelope(&pub_subject, 64);
+
+                b.iter_custom(|iters| {
+                    let start = std::time::Instant::now();
+                    for _ in 0..iters {
+                        for _ in 0..num_messages {
+                            black_box(engine.publish(&envelope));
+                        }
+                    }
+                    start.elapsed()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Groups
 // ---------------------------------------------------------------------------
 
@@ -427,4 +565,14 @@ criterion_group! {
         bench_subscribe_unsubscribe_churn,
         bench_publish_baseline,
 }
-criterion_main!(benches);
+
+criterion_group! {
+    name = large_scale;
+    config = Criterion::default().measurement_time(Duration::from_secs(15));
+    targets =
+        bench_large_scale_fanout,
+        bench_lookup_throughput,
+        bench_large_scale_wildcards,
+}
+
+criterion_main!(benches, large_scale);

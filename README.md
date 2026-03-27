@@ -82,42 +82,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 3. Queue groups (load balancing)
 
 ```rust,no_run
-# use futures::StreamExt;
-# use hermes_client::HermesClient;
-# use hermes_core::Event;
-# use serde::{Deserialize, Serialize};
-# #[derive(Debug, Clone, Serialize, Deserialize, Event)]
-# struct Task { id: u32 }
-# async fn example(client: &HermesClient) {
-// Multiple subscribers in the same group — each message goes to exactly one
-let mut stream = client.subscribe::<Task>(&["workers"]).await.unwrap();
-# }
+use futures::StreamExt;
+use hermes_client::HermesClient;
+use hermes_core::Event;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Event)]
+struct Task { id: u32 }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = HermesClient::connect("http://127.0.0.1:4222").await?;
+
+    // Multiple subscribers in the same group — each message goes to exactly one
+    for i in 0..3 {
+        let c = client.clone();
+        tokio::spawn(async move {
+            let mut stream = c.subscribe::<Task>(&["workers"]).await.unwrap();
+            while let Some(Ok(task)) = stream.next().await {
+                println!("Worker {i} got task #{}", task.id);
+            }
+        });
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    for id in 0..10 {
+        client.publish(&Task { id }).await?;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    Ok(())
+}
 ```
 
 ### 4. Durable delivery (at-least-once)
 
 ```rust,no_run
-# use hermes_client::HermesClient;
-# use hermes_core::Event;
-# use serde::{Deserialize, Serialize};
-# #[derive(Debug, Clone, Serialize, Deserialize, Event)]
-# struct Payment { id: String }
-# async fn example(client: &HermesClient) -> Result<(), Box<dyn std::error::Error>> {
-// Publish with persistence
-client.publish_durable(&Payment { id: "PAY-1".into() }).await?;
+use hermes_client::HermesClient;
+use hermes_core::Event;
+use serde::{Deserialize, Serialize};
 
-// Subscribe with ack/nack — un-acked messages are automatically redelivered
-let mut sub = client
-    .subscribe_durable::<Payment>("payment-processor", &[], 10, 30)
-    .await?;
+#[derive(Debug, Clone, Serialize, Deserialize, Event)]
+struct Payment { id: String }
 
-while let Some(msg) = sub.next().await {
-    let msg = msg?;
-    println!("payment: {:?}", msg.event);
-    msg.ack().await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = HermesClient::connect("http://127.0.0.1:4222").await?;
+
+    // Publish with persistence
+    client.publish_durable(&Payment { id: "PAY-1".into() }).await?;
+
+    // Subscribe with ack/nack — un-acked messages are automatically redelivered
+    let mut sub = client
+        .subscribe_durable::<Payment>("payment-processor", &[], 10, 30)
+        .await?;
+
+    while let Some(msg) = sub.next().await {
+        let msg = msg?;
+        println!("payment: {:?}", msg.event);
+        msg.ack().await?;
+    }
+
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 ## Crates

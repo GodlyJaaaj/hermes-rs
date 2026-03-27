@@ -2,8 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-#[cfg(debug_assertions)]
-use hermes_core::DEBUG_QUEUE_GROUP_HEADER;
 use hermes_core::Subject;
 use hermes_proto::{DurableServerMessage, EventEnvelope};
 use hermes_store::{MessageStore, StoreError};
@@ -263,11 +261,11 @@ impl BrokerEngine {
         subject_json: &str,
     ) -> usize {
         let mut delivered: usize = 0;
-        groups.retain(|group, members| {
+        groups.retain(|_group, members| {
             if members.is_empty() {
                 return false;
             }
-            delivered += self.deliver_one_group(members, arc_env, subject_json, group);
+            delivered += self.deliver_one_group(members, arc_env, subject_json);
             !members.is_empty()
         });
         delivered
@@ -280,7 +278,6 @@ impl BrokerEngine {
         members: &mut Vec<QueueGroupMember>,
         arc_env: &Arc<EventEnvelope>,
         subject_json: &str,
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))] group_name: &str,
     ) -> usize {
         let len = members.len();
         let start = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
@@ -291,20 +288,7 @@ impl BrokerEngine {
             }
             let idx = (start + i) % members.len();
 
-            // In debug builds, clone the envelope to add a debug header.
-            // In release builds, send the shared Arc directly (zero-copy).
-            #[cfg(debug_assertions)]
-            let envelope_to_send = {
-                let mut tagged = (**arc_env).clone();
-                tagged
-                    .headers
-                    .insert(DEBUG_QUEUE_GROUP_HEADER.to_string(), group_name.to_string());
-                Arc::new(tagged)
-            };
-            #[cfg(not(debug_assertions))]
-            let envelope_to_send = Arc::clone(arc_env);
-
-            match members[idx].sender.try_send(envelope_to_send) {
+            match members[idx].sender.try_send(Arc::clone(arc_env)) {
                 Ok(()) => return 1,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!(
@@ -628,30 +612,6 @@ mod tests {
         let got2 = drain_count(&mut rx2);
         let got3 = drain_count(&mut rx3);
         assert_eq!(got1 + got2 + got3, 2, "two groups = two deliveries");
-    }
-
-    #[cfg(debug_assertions)]
-    #[tokio::test]
-    async fn test_queue_group_header_debug() {
-        use hermes_core::DEBUG_QUEUE_GROUP_HEADER;
-
-        let engine = BrokerEngine::new(16);
-        let subject = Subject::new().str("test").str("Header");
-        let json = subject.to_json();
-
-        let (_id, mut rx) = engine.subscribe(json.clone(), vec!["workers".into()]);
-        let envelope = make_envelope(&json);
-
-        assert_eq!(engine.publish(&envelope), 1);
-
-        let received = try_recv(&mut rx).expect("message should be received");
-        assert_eq!(
-            received
-                .headers
-                .get(DEBUG_QUEUE_GROUP_HEADER)
-                .map(String::as_str),
-            Some("workers")
-        );
     }
 
     #[tokio::test]
