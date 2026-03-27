@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-# hermes-server = { package = "hermes-broker-server", path = "../server", version = "0.1.0" }
+hermes-server = { package = "hermes-broker-server", path = "../server", version = "0.1.0" }
 hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.1.0" }
 tempfile = { workspace = true }
 criterion = { workspace = true }
