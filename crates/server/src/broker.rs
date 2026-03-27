@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use hermes_core::{DEBUG_QUEUE_GROUP_HEADER, Subject};
+#[cfg(debug_assertions)]
+use hermes_core::DEBUG_QUEUE_GROUP_HEADER;
+use hermes_core::Subject;
 use hermes_proto::{DurableServerMessage, EventEnvelope};
 use hermes_store::{MessageStore, StoreError};
 use tokio::sync::mpsc;
@@ -278,6 +280,7 @@ impl BrokerEngine {
         members: &mut Vec<QueueGroupMember>,
         arc_env: &Arc<EventEnvelope>,
         subject_json: &str,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         group_name: &str,
     ) -> usize {
         let len = members.len();
@@ -289,13 +292,20 @@ impl BrokerEngine {
             }
             let idx = (start + i) % members.len();
 
-            // Clone once per attempt to add the debug header.
-            let mut tagged_envelope = (**arc_env).clone();
-            tagged_envelope
-                .headers
-                .insert(DEBUG_QUEUE_GROUP_HEADER.to_string(), group_name.to_string());
+            // In debug builds, clone the envelope to add a debug header.
+            // In release builds, send the shared Arc directly (zero-copy).
+            #[cfg(debug_assertions)]
+            let envelope_to_send = {
+                let mut tagged = (**arc_env).clone();
+                tagged
+                    .headers
+                    .insert(DEBUG_QUEUE_GROUP_HEADER.to_string(), group_name.to_string());
+                Arc::new(tagged)
+            };
+            #[cfg(not(debug_assertions))]
+            let envelope_to_send = Arc::clone(arc_env);
 
-            match members[idx].sender.try_send(Arc::new(tagged_envelope)) {
+            match members[idx].sender.try_send(envelope_to_send) {
                 Ok(()) => return 1,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!(
