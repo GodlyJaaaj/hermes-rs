@@ -12,9 +12,9 @@ keywords = ["messaging", "broker", "grpc", "pubsub", "queue"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-hermes-core = { package = "hermes-broker-core", path = "../core", version = "0.3.1" }
-hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.3.1" }
-hermes-store = { package = "hermes-broker-store", path = "../store", version = "0.3.1" }
+hermes-core = { package = "hermes-broker-core", path = "../core", version = "0.3.2" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.3.2" }
+hermes-store = { package = "hermes-broker-store", path = "../store", version = "0.3.2" }
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
 tokio = { workspace = true }

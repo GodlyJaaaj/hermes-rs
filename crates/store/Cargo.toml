@@ -12,7 +12,7 @@ keywords = ["messaging", "broker", "storage", "durable", "redb"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.3.1" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.3.2" }
 redb = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
