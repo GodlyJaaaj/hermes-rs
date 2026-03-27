@@ -12,7 +12,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.3.2"
+version = "0.3.3"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/GodlyJaaaj/hermes-rs"
 homepage = "https://github.com/GodlyJaaaj/hermes-rs"
@@ -21,6 +21,16 @@ keywords = ["messaging", "broker", "grpc", "pubsub", "events"]
 categories = ["network-programming", "asynchronous"]
 
 [workspace.dependencies]
+# Internal crates — version is kept in sync with workspace.package.version
+# The `package` field maps the local alias (hermes-macros) to the crate name (hermes-broker-macros)
+hermes-macros = { package = "hermes-broker-macros", path = "crates/macros", version = "0.3.3" }
+hermes-proto = { package = "hermes-broker-proto", path = "crates/proto", version = "0.3.3" }
+hermes-core = { package = "hermes-broker-core", path = "crates/core", version = "0.3.3" }
+hermes-store = { package = "hermes-broker-store", path = "crates/store", version = "0.3.3" }
+hermes-server = { package = "hermes-broker-server", path = "crates/server", version = "0.3.3" }
+hermes-client = { package = "hermes-broker-client", path = "crates/client", version = "0.3.3" }
+
+# External
 tonic = "0.14"
 tonic-build = "0.14"
 tonic-prost = "0.14"

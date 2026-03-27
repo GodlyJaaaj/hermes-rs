@@ -5,10 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hermes-client = { package = "hermes-broker-client", path = "../client" }
-hermes-server = { package = "hermes-broker-server", path = "../server" }
-hermes-core = { package = "hermes-broker-core", path = "../core" }
-hermes-proto = { package = "hermes-broker-proto", path = "../proto" }
+hermes-client = { workspace = true }
+hermes-server = { workspace = true }
+hermes-core = { workspace = true }
+hermes-proto = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
