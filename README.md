@@ -174,6 +174,16 @@ Without `HERMES_STORE_PATH`, the server runs in fire-and-forget mode only.
 
 See the [server README](crates/server/README.md) for all configuration options.
 
+## Development
+
+After cloning, install the git hooks:
+
+```sh
+./hooks/install.sh
+```
+
+This sets up a **pre-push** hook that runs `cargo fmt --check` and blocks the push if code is unformatted.
+
 ## License
 
 Licensed under either of:
