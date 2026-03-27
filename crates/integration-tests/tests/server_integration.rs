@@ -28,6 +28,13 @@ enum OrderEvent {
 
 event_group!(UserEvents = [UserCreated, UserDeleted]);
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Event)]
+#[event(subject = "notifications.alert")]
+struct Alert {
+    severity: String,
+    message: String,
+}
+
 // -- Helpers --
 
 async fn start_broker() -> SocketAddr {
@@ -261,5 +268,52 @@ async fn test_batch_publisher() {
             .unwrap()
             .unwrap();
         assert_eq!(received.user_id, format!("u_{i}"));
+    }
+}
+
+#[tokio::test]
+async fn test_custom_subject_fanout_two_clients() {
+    let addr = start_broker().await;
+    let uri = addr_to_uri(addr);
+
+    // Three independent connections: one publisher, two subscribers
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber_a = HermesClient::connect(&uri).await.unwrap();
+    let subscriber_b = HermesClient::connect(&uri).await.unwrap();
+
+    // Both subscribe to Alert (custom subject "notifications.alert")
+    let mut stream_a = subscriber_a.subscribe::<Alert>(&[]).await.unwrap();
+    let mut stream_b = subscriber_b.subscribe::<Alert>(&[]).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Publish 3 alerts
+    let alerts: Vec<Alert> = (0..3)
+        .map(|i| Alert {
+            severity: if i == 0 { "critical".into() } else { "warning".into() },
+            message: format!("alert #{i}"),
+        })
+        .collect();
+
+    for alert in &alerts {
+        publisher.publish(alert).await.unwrap();
+    }
+
+    // Both subscribers should receive all 3 (fanout)
+    for (i, expected) in alerts.iter().enumerate() {
+        let a = tokio::time::timeout(Duration::from_secs(2), stream_a.next())
+            .await
+            .unwrap_or_else(|_| panic!("timeout waiting for alert #{i} on subscriber A"))
+            .expect("stream A ended")
+            .expect("decode error on A");
+
+        let b = tokio::time::timeout(Duration::from_secs(2), stream_b.next())
+            .await
+            .unwrap_or_else(|_| panic!("timeout waiting for alert #{i} on subscriber B"))
+            .expect("stream B ended")
+            .expect("decode error on B");
+
+        assert_eq!(&a, expected, "subscriber A mismatch on alert #{i}");
+        assert_eq!(&b, expected, "subscriber B mismatch on alert #{i}");
     }
 }
