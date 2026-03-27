@@ -52,58 +52,58 @@ impl ServerConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(addr) = std::env::var("HERMES_LISTEN_ADDR") {
-            if let Ok(parsed) = addr.parse() {
-                config.listen_addr = parsed;
-            }
+        if let Ok(addr) = std::env::var("HERMES_LISTEN_ADDR")
+            && let Ok(parsed) = addr.parse()
+        {
+            config.listen_addr = parsed;
         }
-        if let Ok(cap) = std::env::var("HERMES_CHANNEL_CAPACITY") {
-            if let Ok(parsed) = cap.parse() {
-                config.subscriber_channel_capacity = parsed;
-            }
+        if let Ok(cap) = std::env::var("HERMES_CHANNEL_CAPACITY")
+            && let Ok(parsed) = cap.parse()
+        {
+            config.subscriber_channel_capacity = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_GRPC_OUTPUT_BUFFER") {
-            if let Ok(parsed) = v.parse() {
-                config.grpc_output_buffer = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_GRPC_OUTPUT_BUFFER")
+            && let Ok(parsed) = v.parse()
+        {
+            config.grpc_output_buffer = parsed;
         }
         if let Ok(path) = std::env::var("HERMES_STORE_PATH") {
             config.store_path = Some(PathBuf::from(path));
         }
-        if let Ok(v) = std::env::var("HERMES_REDELIVERY_INTERVAL") {
-            if let Ok(parsed) = v.parse() {
-                config.redelivery_interval_secs = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_REDELIVERY_INTERVAL")
+            && let Ok(parsed) = v.parse()
+        {
+            config.redelivery_interval_secs = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_MAX_DELIVERY_ATTEMPTS") {
-            if let Ok(parsed) = v.parse() {
-                config.max_delivery_attempts = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_MAX_DELIVERY_ATTEMPTS")
+            && let Ok(parsed) = v.parse()
+        {
+            config.max_delivery_attempts = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_RETENTION_SECS") {
-            if let Ok(parsed) = v.parse() {
-                config.retention_secs = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_RETENTION_SECS")
+            && let Ok(parsed) = v.parse()
+        {
+            config.retention_secs = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_ACK_TIMEOUT") {
-            if let Ok(parsed) = v.parse() {
-                config.default_ack_timeout_secs = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_ACK_TIMEOUT")
+            && let Ok(parsed) = v.parse()
+        {
+            config.default_ack_timeout_secs = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_MAX_IN_FLIGHT") {
-            if let Ok(parsed) = v.parse() {
-                config.default_max_in_flight = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_MAX_IN_FLIGHT")
+            && let Ok(parsed) = v.parse()
+        {
+            config.default_max_in_flight = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_GC_INTERVAL") {
-            if let Ok(parsed) = v.parse() {
-                config.gc_interval_secs = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_GC_INTERVAL")
+            && let Ok(parsed) = v.parse()
+        {
+            config.gc_interval_secs = parsed;
         }
-        if let Ok(v) = std::env::var("HERMES_REDELIVERY_BATCH_SIZE") {
-            if let Ok(parsed) = v.parse() {
-                config.redelivery_batch_size = parsed;
-            }
+        if let Ok(v) = std::env::var("HERMES_REDELIVERY_BATCH_SIZE")
+            && let Ok(parsed) = v.parse()
+        {
+            config.redelivery_batch_size = parsed;
         }
 
         config

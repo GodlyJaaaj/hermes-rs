@@ -8,15 +8,13 @@ fn extract_custom_subject(attrs: &[syn::Attribute]) -> Option<String> {
         if !attr.path().is_ident("event") {
             continue;
         }
-        if let Ok(Meta::NameValue(nv)) = attr.parse_args::<Meta>() {
-            if nv.path.is_ident("subject") {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: Lit::Str(s), ..
-                }) = &nv.value
-                {
-                    return Some(s.value());
-                }
-            }
+        if let Ok(Meta::NameValue(nv)) = attr.parse_args::<Meta>()
+            && nv.path.is_ident("subject")
+            && let syn::Expr::Lit(syn::ExprLit {
+                lit: Lit::Str(s), ..
+            }) = &nv.value
+        {
+            return Some(s.value());
         }
     }
     None

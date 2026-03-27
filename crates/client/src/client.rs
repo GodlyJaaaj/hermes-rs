@@ -107,7 +107,7 @@ impl HermesClient {
         durable_subscriber::subscribe_durable(
             client,
             consumer_name,
-            &subject,
+            subject,
             queue_groups,
             max_in_flight,
             ack_timeout_secs,

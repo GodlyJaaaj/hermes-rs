@@ -290,7 +290,11 @@ async fn test_custom_subject_fanout_two_clients() {
     // Publish 3 alerts
     let alerts: Vec<Alert> = (0..3)
         .map(|i| Alert {
-            severity: if i == 0 { "critical".into() } else { "warning".into() },
+            severity: if i == 0 {
+                "critical".into()
+            } else {
+                "warning".into()
+            },
             message: format!("alert #{i}"),
         })
         .collect();
