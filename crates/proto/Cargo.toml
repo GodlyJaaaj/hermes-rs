@@ -10,6 +10,15 @@ documentation = "https://docs.rs/hermes-broker-proto"
 readme = "../../README.md"
 keywords = ["messaging", "broker", "grpc", "protobuf", "events"]
 categories = ["network-programming", "asynchronous"]
+include = [
+    "/src/**/*",
+    "/build.rs",
+    "/Cargo.toml",
+    "/proto/**/*"
+]
+
+[lib]
+name = "hermes_proto"
 
 [dependencies]
 tonic = { workspace = true }
@@ -18,7 +27,3 @@ prost = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
-
-[lib]
-name = "hermes_proto"
-

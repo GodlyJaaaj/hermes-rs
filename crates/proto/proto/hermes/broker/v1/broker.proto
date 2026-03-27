@@ -1,0 +1,81 @@
+syntax = "proto3";
+package hermes.broker.v1;
+
+service Broker {
+  // Fire-and-forget: client-streaming publish, ack at stream close
+  rpc Publish(stream EventEnvelope) returns (PublishAck);
+
+  // Fire-and-forget: server-streaming subscription
+  rpc Subscribe(SubscribeRequest) returns (stream EventEnvelope);
+
+  // Durable: persist before ack
+  rpc PublishDurable(stream EventEnvelope) returns (PublishDurableAck);
+
+  // Durable: bidirectional stream with explicit ack/nack
+  rpc SubscribeDurable(stream DurableClientMessage) returns (stream DurableServerMessage);
+}
+
+// --- Shared ---
+
+message EventEnvelope {
+  string id = 1;
+  string subject = 2;
+  bytes payload = 3;
+  map<string, string> headers = 4;
+  int64 timestamp_nanos = 5;
+}
+
+// --- Fire-and-forget ---
+
+message SubscribeRequest {
+  string subject = 1;
+  repeated string queue_groups = 2;
+}
+
+message PublishAck {
+  uint64 accepted = 1;
+}
+
+// --- Durable ---
+
+message PublishDurableAck {
+  uint64 accepted = 1;
+  uint64 persisted = 2;
+}
+
+message DurableSubscribeRequest {
+  string subject = 1;
+  string consumer_name = 2;
+  repeated string queue_groups = 3;
+  uint32 max_in_flight = 4;
+  uint32 ack_timeout_seconds = 5;
+}
+
+message Ack {
+  string message_id = 1;
+}
+
+message Nack {
+  string message_id = 1;
+  bool requeue = 2;
+}
+
+message DurableClientMessage {
+  oneof msg {
+    DurableSubscribeRequest subscribe = 1;
+    Ack ack = 2;
+    Nack nack = 3;
+  }
+}
+
+message DurableServerMessage {
+  oneof msg {
+    EventEnvelope envelope = 1;
+    Redelivery redelivery = 2;
+  }
+}
+
+message Redelivery {
+  EventEnvelope envelope = 1;
+  uint32 attempt = 2;
+}
