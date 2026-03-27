@@ -1,11 +1,23 @@
 [package]
-name = "hermes-core"
+name = "hermes-broker-core"
 version = "0.1.0"
 edition = "2024"
+description = "Core Hermes event traits, subject types, encoding/decoding helpers, and macros re-exports."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-core"
+readme = "../../README.md"
+keywords = ["messaging", "broker", "events", "pubsub", "grpc"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-hermes-macros = { path = "../macros" }
+hermes-macros = { package = "hermes-broker-macros", path = "../macros", version = "0.1.0" }
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+
+[lib]
+name = "hermes_core"
+

@@ -1,3 +1,66 @@
+//! `hermes-server` is the server-side crate for the Hermes gRPC event broker.
+//!
+//! It provides:
+//! - a broker engine with fanout and queue-group delivery
+//! - a gRPC service implementation (via `tonic`)
+//! - optional durable delivery with redelivery + garbage-collection loops
+//!
+//! # Quick start
+//!
+//! Run a server from a bound `TcpListener`:
+//!
+//! ```rust
+//! use tokio::net::TcpListener;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let listener = TcpListener::bind("127.0.0.1:4222").await?;
+//!     hermes_server::run(listener).await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Run with explicit configuration:
+//!
+//! ```rust
+//! use tokio::net::TcpListener;
+//! use hermes_server::config::ServerConfig;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let listener = TcpListener::bind("127.0.0.1:4222").await?;
+//!     let mut cfg = ServerConfig::default();
+//!     cfg.subscriber_channel_capacity = 16_384;
+//!     cfg.store_path = Some("hermes.redb".into());
+//!     hermes_server::run_with_config(listener, cfg).await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Configuration
+//!
+//! The server can be configured programmatically with [`config::ServerConfig`] and can
+//! also be initialized from environment variables through `ServerConfig::from_env()`.
+//!
+//! Useful env vars include:
+//! - `HERMES_LISTEN_ADDR`
+//! - `HERMES_CHANNEL_CAPACITY`
+//! - `HERMES_GRPC_OUTPUT_BUFFER`
+//! - `HERMES_STORE_PATH`
+//! - `HERMES_REDELIVERY_INTERVAL`
+//! - `HERMES_MAX_DELIVERY_ATTEMPTS`
+//! - `HERMES_RETENTION_SECS`
+//! - `HERMES_ACK_TIMEOUT`
+//! - `HERMES_MAX_IN_FLIGHT`
+//! - `HERMES_GC_INTERVAL`
+//! - `HERMES_REDELIVERY_BATCH_SIZE`
+//!
+//! # Notes
+//!
+//! - If `store_path` is `None`, the server runs in fire-and-forget mode (no durable
+//!   redelivery persistence).
+//! - If `store_path` is set, durable store-backed redelivery and GC loops are spawned.
+
 pub mod broker;
 pub mod config;
 pub mod grpc;

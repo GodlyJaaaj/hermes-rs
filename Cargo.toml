@@ -9,6 +9,16 @@ members = [
     "crates/store",
 ]
 
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-client"
+keywords = ["messaging", "broker", "grpc", "pubsub", "events"]
+categories = ["network-programming", "asynchronous"]
+
 [workspace.dependencies]
 tonic = "0.14"
 tonic-build = "0.14"

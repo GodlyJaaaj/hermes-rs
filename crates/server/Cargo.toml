@@ -1,12 +1,20 @@
 [package]
-name = "hermes-server"
+name = "hermes-broker-server"
 version = "0.1.0"
 edition = "2024"
+description = "Hermes gRPC broker server with fanout, queue groups, and durable delivery."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-server"
+readme = "README.md"
+keywords = ["messaging", "broker", "grpc", "pubsub", "queue"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-hermes-core = { path = "../core" }
-hermes-proto = { path = "../proto" }
-hermes-store = { path = "../store" }
+hermes-core = { package = "hermes-broker-core", path = "../core", version = "0.1.0" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.1.0" }
+hermes-store = { package = "hermes-broker-store", path = "../store", version = "0.1.0" }
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
 tokio = { workspace = true }
@@ -18,7 +26,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-hermes-client = { path = "../client" }
+hermes-client = { package = "hermes-broker-client", path = "../client", version = "0.1.0" }
 futures = { workspace = true }
 serde = { workspace = true }
 criterion = { workspace = true }
@@ -27,3 +35,7 @@ tokio = { workspace = true }
 [[bench]]
 name = "engine_benchmarks"
 harness = false
+
+[lib]
+name = "hermes_server"
+

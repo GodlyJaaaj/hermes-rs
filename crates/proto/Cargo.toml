@@ -1,7 +1,15 @@
 [package]
-name = "hermes-proto"
+name = "hermes-broker-proto"
 version = "0.1.0"
 edition = "2024"
+description = "Protobuf and gRPC generated types/services for the Hermes broker."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-proto"
+readme = "../../README.md"
+keywords = ["messaging", "broker", "grpc", "protobuf", "events"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 tonic = { workspace = true }
@@ -10,3 +18,7 @@ prost = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
+
+[lib]
+name = "hermes_proto"
+

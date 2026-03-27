@@ -1,10 +1,22 @@
 [package]
-name = "hermes-store"
+name = "hermes-broker-store"
 version = "0.1.0"
 edition = "2024"
+description = "Durable message storage backend for Hermes using redb."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-store"
+readme = "../../README.md"
+keywords = ["messaging", "broker", "storage", "durable", "redb"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
-hermes-proto = { path = "../proto" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.1.0" }
 redb = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[lib]
+name = "hermes_store"
+

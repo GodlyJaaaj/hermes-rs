@@ -1,10 +1,19 @@
 [package]
-name = "hermes-macros"
+name = "hermes-broker-macros"
 version = "0.1.0"
 edition = "2024"
+description = "Procedural macros for Hermes event ergonomics."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-macros"
+readme = "../../README.md"
+keywords = ["messaging", "broker", "grpc", "macros", "events"]
+categories = ["network-programming", "asynchronous"]
 
 [lib]
 proc-macro = true
+name = "hermes_macros"
 
 [dependencies]
 syn = { workspace = true }

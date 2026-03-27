@@ -1,11 +1,19 @@
 [package]
-name = "hermes-client"
+name = "hermes-broker-client"
 version = "0.1.0"
 edition = "2024"
+description = "Typed async client for the Hermes gRPC event broker."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GodlyJaaaj/hermes-rs"
+homepage = "https://github.com/GodlyJaaaj/hermes-rs"
+documentation = "https://docs.rs/hermes-broker-client"
+readme = "README.md"
+keywords = ["messaging", "broker", "grpc", "event", "pubsub"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-hermes-core = { path = "../core" }
-hermes-proto = { path = "../proto" }
+hermes-core = { package = "hermes-broker-core", path = "../core", version = "0.1.0" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.1.0" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -15,8 +23,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-hermes-server = { path = "../server" }
-hermes-proto = { path = "../proto" }
+hermes-server = { package = "hermes-broker-server", path = "../server", version = "0.1.0" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto", version = "0.1.0" }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 ratatui = "0.30"
@@ -25,3 +33,7 @@ crossterm = "0.29"
 [[bench]]
 name = "grpc_benchmarks"
 harness = false
+
+[lib]
+name = "hermes_client"
+
