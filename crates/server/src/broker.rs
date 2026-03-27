@@ -280,8 +280,7 @@ impl BrokerEngine {
         members: &mut Vec<QueueGroupMember>,
         arc_env: &Arc<EventEnvelope>,
         subject_json: &str,
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        group_name: &str,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))] group_name: &str,
     ) -> usize {
         let len = members.len();
         let start = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
@@ -631,8 +630,11 @@ mod tests {
         assert_eq!(got1 + got2 + got3, 2, "two groups = two deliveries");
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn test_queue_group_header_debug() {
+        use hermes_core::DEBUG_QUEUE_GROUP_HEADER;
+
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("Header");
         let json = subject.to_json();
@@ -646,7 +648,7 @@ mod tests {
         assert_eq!(
             received
                 .headers
-                .get(super::DEBUG_QUEUE_GROUP_HEADER)
+                .get(DEBUG_QUEUE_GROUP_HEADER)
                 .map(String::as_str),
             Some("workers")
         );
