@@ -6,6 +6,7 @@ use hermes_proto::{
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
+use tracing::{debug, trace, warn};
 
 use crate::error::ClientError;
 
@@ -21,6 +22,7 @@ pub struct DurableMessage<E> {
 impl<E> DurableMessage<E> {
     /// Acknowledge this message. It won't be redelivered.
     pub async fn ack(self) -> Result<(), ClientError> {
+        trace!(message_id = %self.message_id, "sending ack");
         let msg = DurableClientMessage {
             msg: Some(ClientMsg::Ack(Ack {
                 message_id: self.message_id,
@@ -35,6 +37,7 @@ impl<E> DurableMessage<E> {
     /// Negative acknowledge. If `requeue` is true, the message will be
     /// redelivered immediately. If false, it goes to the dead-letter subject.
     pub async fn nack(self, requeue: bool) -> Result<(), ClientError> {
+        trace!(message_id = %self.message_id, requeue, "sending nack");
         let msg = DurableClientMessage {
             msg: Some(ClientMsg::Nack(Nack {
                 message_id: self.message_id,
@@ -94,6 +97,8 @@ pub(crate) async fn subscribe_durable<E: Event>(
         .await?;
     let mut server_stream = response.into_inner();
 
+    debug!(consumer_name, subject = %subject.to_json(), max_in_flight, ack_timeout_secs, "durable subscription stream opened");
+
     // Channel for decoded messages to the caller.
     let (msg_tx, msg_rx) = mpsc::channel(capacity);
 
@@ -112,9 +117,11 @@ pub(crate) async fn subscribe_durable<E: Event>(
             };
 
             let message_id = envelope.id.clone();
+            trace!(message_id = %message_id, attempt, "received durable message");
             let decoded = match hermes_core::decode::<E>(&envelope.payload) {
                 Ok(e) => e,
                 Err(e) => {
+                    warn!(message_id = %message_id, "failed to decode durable message");
                     let _ = msg_tx.send(Err(ClientError::Decode(e))).await;
                     continue;
                 }
@@ -131,6 +138,7 @@ pub(crate) async fn subscribe_durable<E: Event>(
                 break;
             }
         }
+        debug!("durable subscription stream closed");
     });
 
     Ok(DurableSubscriber { rx: msg_rx })

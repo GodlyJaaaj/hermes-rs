@@ -2,7 +2,7 @@ use std::path::Path;
 
 use hermes_proto::EventEnvelope;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::error::StoreError;
 use crate::{DeliveryState, MessageStore, StoredMessage};
@@ -361,6 +361,7 @@ impl RedbMessageStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let db = Database::create(path.as_ref())?;
         Self::init_tables(&db)?;
+        debug!(path = %path.as_ref().display(), "store opened");
         Ok(Self { db })
     }
 
@@ -475,6 +476,7 @@ impl MessageStore for RedbMessageStore {
             }
         }
 
+        debug!(consumer_name, count = result.len(), "fetched pending messages");
         Ok(result)
     }
 
@@ -498,6 +500,7 @@ impl MessageStore for RedbMessageStore {
         }
         txn.commit()?;
 
+        trace!(message_id, consumer_name, "delivery recorded");
         Ok(())
     }
 
@@ -603,6 +606,7 @@ impl MessageStore for RedbMessageStore {
             }
         }
 
+        debug!(consumer_name, count = result.len(), "fetched expired messages");
         Ok(result)
     }
 
@@ -703,6 +707,7 @@ impl MessageStore for RedbMessageStore {
             names.push(entry.0.value().to_string());
         }
 
+        trace!(count = names.len(), "listed consumers");
         Ok(names)
     }
 }

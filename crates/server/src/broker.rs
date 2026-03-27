@@ -6,7 +6,7 @@ use hermes_core::Subject;
 use hermes_proto::{DurableServerMessage, EventEnvelope};
 use hermes_store::{MessageStore, StoreError};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
 use crate::subscription::{
@@ -202,11 +202,13 @@ impl BrokerEngine {
         // 2) Wildcard match (iterate patterns).
         delivered += self.publish_wildcard(subject_json, &arc_env);
 
+        debug!(subject = subject_json, id = %envelope.id, delivered, "publish completed");
         delivered
     }
 
     fn publish_exact(&self, subject_json: &str, arc_env: &Arc<EventEnvelope>) -> usize {
         let Some(mut subs) = self.exact_subscriptions.get_mut(subject_json) else {
+            trace!(subject = subject_json, "no exact subscribers");
             return 0;
         };
         self.deliver_to_subscribers(&mut subs, arc_env, subject_json)
@@ -223,6 +225,7 @@ impl BrokerEngine {
         let mut total = 0;
         for mut entry in self.wildcard_subscriptions.iter_mut() {
             if entry.value().pattern.matches(&subject) {
+                trace!(subject = subject_json, pattern = %entry.key(), "wildcard match");
                 let we = entry.value_mut();
                 total += self.deliver_to_subscribers(&mut we.subscribers, arc_env, subject_json);
             }
@@ -252,7 +255,9 @@ impl BrokerEngine {
         if fanout.receiver_count() == 0 {
             return 0;
         }
-        fanout.send(Arc::clone(arc_env)).unwrap_or(0)
+        let count = fanout.send(Arc::clone(arc_env)).unwrap_or(0);
+        trace!(receivers = count, "fanout delivered");
+        count
     }
 
     /// Round-robin dispatch to each queue group. Removes dead members in-place.
@@ -291,7 +296,10 @@ impl BrokerEngine {
             let idx = (start + i) % members.len();
 
             match members[idx].sender.try_send(Arc::clone(arc_env)) {
-                Ok(()) => return 1,
+                Ok(()) => {
+                    trace!(subject = subject_json, member = %members[idx].id, "queue-group delivered");
+                    return 1;
+                }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         subject = subject_json,
@@ -326,6 +334,7 @@ impl BrokerEngine {
         // Durable consumers.
         self.dispatch_to_durable_consumers(store, envelope);
 
+        debug!(id = %envelope.id, subject = %envelope.subject, delivered, "durable publish completed");
         Ok(delivered)
     }
 
@@ -345,6 +354,8 @@ impl BrokerEngine {
 
             let now_ms = now_ms();
             let deadline = now_ms + u64::from(consumer.ack_timeout_secs) * 1000;
+
+            trace!(consumer = %consumer.consumer_name, id = %envelope.id, "dispatching to durable consumer");
 
             if let Err(e) = store.mark_delivered(&envelope.id, &consumer.consumer_name, deadline) {
                 warn!(
@@ -440,13 +451,21 @@ impl BrokerEngine {
         max_in_flight: u32,
         ack_timeout_secs: u32,
     ) {
-        let Ok(pending) = store.fetch_pending(consumer_name, max_in_flight) else {
-            return;
+        let pending = match store.fetch_pending(consumer_name, max_in_flight) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(consumer_name, "catch-up: fetch_pending failed: {e}");
+                return;
+            }
         };
 
+        let pending_count = pending.len();
+
         for stored in pending {
+            let msg_id = stored.envelope.id.clone();
+            let attempt = stored.attempt;
             let deadline = now_ms() + u64::from(ack_timeout_secs) * 1000;
-            let _ = store.mark_delivered(&stored.envelope.id, consumer_name, deadline);
+            let _ = store.mark_delivered(&msg_id, consumer_name, deadline);
 
             let msg = if stored.attempt > 1 {
                 DurableServerMessage {
@@ -468,6 +487,11 @@ impl BrokerEngine {
             if let Some(consumer) = self.durable_consumers.get(consumer_name) {
                 let _ = consumer.sender.try_send(msg);
             }
+            trace!(consumer_name, id = %msg_id, attempt, "catch-up: delivering pending message");
+        }
+
+        if pending_count > 0 {
+            debug!(consumer_name, pending = pending_count, "catch-up completed");
         }
     }
 

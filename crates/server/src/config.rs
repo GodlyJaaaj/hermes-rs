@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use tracing::info;
+
 pub struct ServerConfig {
     pub listen_addr: SocketAddr,
     /// Capacity of the broadcast (fanout) and mpsc (queue-group) channels
@@ -105,6 +107,21 @@ impl ServerConfig {
         {
             config.redelivery_batch_size = parsed;
         }
+
+        info!(
+            listen_addr = %config.listen_addr,
+            channel_capacity = config.subscriber_channel_capacity,
+            grpc_output_buffer = config.grpc_output_buffer,
+            store_path = ?config.store_path,
+            redelivery_interval_secs = config.redelivery_interval_secs,
+            max_delivery_attempts = config.max_delivery_attempts,
+            retention_secs = config.retention_secs,
+            default_ack_timeout_secs = config.default_ack_timeout_secs,
+            default_max_in_flight = config.default_max_in_flight,
+            gc_interval_secs = config.gc_interval_secs,
+            redelivery_batch_size = config.redelivery_batch_size,
+            "config loaded"
+        );
 
         config
     }

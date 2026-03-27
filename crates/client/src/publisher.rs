@@ -2,6 +2,7 @@ use hermes_core::{Event, Subject};
 use hermes_proto::{EventEnvelope, PublishAck};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::error::ClientError;
@@ -27,6 +28,7 @@ impl BatchPublisher {
     /// Send a typed event through the batch stream.
     pub async fn send<E: Event>(&self, event: &E) -> Result<(), ClientError> {
         let envelope = make_envelope(event)?;
+        trace!(subject = %envelope.subject, id = %envelope.id, "batch: sending event");
         self.sender
             .send(envelope)
             .await
@@ -50,6 +52,7 @@ impl BatchPublisher {
 
     /// Close the stream and wait for the server ack.
     pub async fn flush(self) -> Result<PublishAck, ClientError> {
+        debug!("batch publisher: flushing stream");
         drop(self.sender);
         self.handle.await.unwrap_or(Err(ClientError::ChannelClosed))
     }

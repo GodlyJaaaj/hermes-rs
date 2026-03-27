@@ -2,6 +2,7 @@ use futures::stream::{self, Stream, StreamExt};
 use hermes_core::{Event, EventGroup, Subject};
 use hermes_proto::{SubscribeRequest, broker_client::BrokerClient};
 use tonic::transport::Channel;
+use tracing::debug;
 
 use crate::error::ClientError;
 
@@ -14,17 +15,22 @@ pub(crate) async fn subscribe_event<E: Event>(
     let subjects = E::subjects();
     let qg: Vec<String> = queue_groups.iter().map(|s| s.to_string()).collect();
 
+    debug!(subject_count = subjects.len(), "subscribing to event subjects");
+
     let mut streams = Vec::with_capacity(subjects.len());
 
     for subject in subjects {
+        let subject_json = subject.to_json();
         let request = SubscribeRequest {
-            subject: subject.to_json(),
+            subject: subject_json.clone(),
             queue_groups: qg.clone(),
         };
 
         let mut c = client.clone();
         let response = c.subscribe(request).await?;
         let inner = response.into_inner();
+
+        debug!(subject = %subject_json, "subscribed to subject stream");
 
         let mapped = inner.map(|result| {
             let envelope = result.map_err(ClientError::Rpc)?;
@@ -45,17 +51,22 @@ pub(crate) async fn subscribe_group<G: EventGroup>(
     let subjects = G::subjects();
     let qg: Vec<String> = queue_groups.iter().map(|s| s.to_string()).collect();
 
+    debug!(subject_count = subjects.len(), "subscribing to event group");
+
     let mut streams = Vec::with_capacity(subjects.len());
 
     for subject in subjects {
+        let subject_json = subject.to_json();
         let request = SubscribeRequest {
-            subject: subject.to_json(),
+            subject: subject_json.clone(),
             queue_groups: qg.clone(),
         };
 
         let mut c = client.clone();
         let response = c.subscribe(request).await?;
         let inner = response.into_inner();
+
+        debug!(subject = %subject_json, "subscribed to subject stream");
 
         let mapped = inner.map(move |result| {
             let envelope = result.map_err(ClientError::Rpc)?;

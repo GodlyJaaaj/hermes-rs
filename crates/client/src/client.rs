@@ -5,6 +5,7 @@ use hermes_proto::{EventEnvelope, SubscribeRequest};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
+use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use crate::durable_subscriber::{self, DurableSubscriber};
@@ -24,6 +25,7 @@ impl HermesClient {
     pub async fn connect(addr: impl Into<String>) -> Result<Self, ClientError> {
         let uri = addr.into();
         let inner = BrokerClient::connect(uri.clone()).await?;
+        info!(uri = %uri, "connected to broker");
         Ok(Self { inner, uri })
     }
 
@@ -37,6 +39,7 @@ impl HermesClient {
     /// Publish a single typed event (fire-and-forget).
     pub async fn publish<E: Event>(&self, event: &E) -> Result<(), ClientError> {
         let envelope = make_envelope(event)?;
+        trace!(subject = %envelope.subject, id = %envelope.id, "publishing event");
         let stream = tokio_stream::once(envelope);
         let mut client = self.inner.clone();
         let _ack = client.publish(stream).await?;
@@ -51,6 +54,7 @@ impl HermesClient {
         &self,
         queue_groups: &[&str],
     ) -> Result<impl Stream<Item = Result<E, ClientError>> + use<E>, ClientError> {
+        debug!("subscribing to event stream");
         let client = self.inner.clone();
         subscriber::subscribe_event(client, queue_groups).await
     }
@@ -75,6 +79,7 @@ impl HermesClient {
             Ok(response.into_inner())
         });
 
+        debug!("batch publisher created");
         BatchPublisher::new(tx, handle)
     }
 
@@ -83,6 +88,7 @@ impl HermesClient {
     /// Publish a single typed event with durability (persisted before ack).
     pub async fn publish_durable<E: Event>(&self, event: &E) -> Result<(), ClientError> {
         let envelope = make_envelope(event)?;
+        trace!(subject = %envelope.subject, id = %envelope.id, "publishing durable event");
         let stream = tokio_stream::once(envelope);
         let mut client = self.inner.clone();
         let _ack = client.publish_durable(stream).await?;
@@ -103,6 +109,8 @@ impl HermesClient {
         // For now, subscribe to the first subject only.
         // Multi-subject durable subscriptions can be added later.
         let subject = subjects.first().ok_or_else(|| ClientError::ChannelClosed)?;
+
+        debug!(consumer_name, subject = %subject.to_json(), max_in_flight, ack_timeout_secs, "subscribing durable");
 
         durable_subscriber::subscribe_durable(
             client,
@@ -130,6 +138,7 @@ impl HermesClient {
             headers: Default::default(),
             timestamp_nanos: now_nanos(),
         };
+        trace!(subject = %envelope.subject, id = %envelope.id, "publishing raw event");
         let stream = tokio_stream::once(envelope);
         let mut client = self.inner.clone();
         let _ack = client.publish(stream).await?;

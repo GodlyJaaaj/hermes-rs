@@ -21,6 +21,7 @@ futures = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
 
 [lib]
 name = "hermes_client"
