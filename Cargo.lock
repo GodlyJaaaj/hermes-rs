@@ -825,17 +825,12 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermes-broker-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "criterion",
- "crossterm",
  "futures",
  "hermes-broker-core",
  "hermes-broker-proto",
- "hermes-broker-server",
- "ratatui",
  "serde",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -845,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "hermes-broker-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "hermes-broker-macros",
@@ -856,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "hermes-broker-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -865,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "hermes-broker-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost",
  "tonic",
@@ -875,12 +870,11 @@ dependencies = [
 
 [[package]]
 name = "hermes-broker-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dashmap",
  "futures",
- "hermes-broker-client",
  "hermes-broker-core",
  "hermes-broker-proto",
  "hermes-broker-store",
@@ -897,12 +891,31 @@ dependencies = [
 
 [[package]]
 name = "hermes-broker-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hermes-broker-proto",
  "redb",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "hermes-integration-tests"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "crossterm",
+ "futures",
+ "hermes-broker-client",
+ "hermes-broker-core",
+ "hermes-broker-proto",
+ "hermes-broker-server",
+ "ratatui",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "uuid",
 ]
 
 [[package]]

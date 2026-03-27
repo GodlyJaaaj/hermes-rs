@@ -1,6 +1,6 @@
-//! Criterion benchmarks for the full gRPC stack (client ↔ embedded server).
+//! Criterion benchmarks for the full gRPC stack (client <-> embedded server).
 //!
-//! Run with: `cargo bench -p hermes-client`
+//! Run with: `cargo bench -p hermes-integration-tests`
 
 use std::time::Duration;
 

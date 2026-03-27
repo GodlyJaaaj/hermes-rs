@@ -3,10 +3,10 @@
 //! Uses `batch_publisher` (single gRPC stream) for high-throughput publishing.
 //! Build with `--release` for realistic numbers:
 //!
-//!   cargo run --release -p hermes-client --example fanout_benchmark -- --n-list 10,100,1000
+//!   cargo run --release -p hermes-integration-tests --example fanout_benchmark -- --n-list 10,100,1000
 //!
 //! Use `--uri` for an external broker:
-//!   cargo run --release -p hermes-client --example fanout_benchmark -- --uri http://127.0.0.1:4222 --n-list 1000
+//!   cargo run --release -p hermes-integration-tests --example fanout_benchmark -- --uri http://127.0.0.1:4222 --n-list 1000
 
 use std::env;
 use std::net::SocketAddr;

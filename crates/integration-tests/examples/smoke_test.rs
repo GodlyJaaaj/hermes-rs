@@ -11,7 +11,7 @@
 //!   8. Durable pub/sub with ack/nack
 //!
 //! Run:
-//!   cargo run -p hermes-client --example smoke_test
+//!   cargo run -p hermes-integration-tests --example smoke_test
 
 use std::net::SocketAddr;
 use std::time::Duration;

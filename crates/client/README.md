@@ -8,8 +8,8 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hermes-broker-client = "0.1"
-hermes-broker-core = "0.1"
+hermes-broker-client = "0.2"
+hermes-broker-core = "0.2"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
@@ -17,7 +17,10 @@ futures = "0.3"
 
 ## Quickstart
 
-Minimal example: define an event with `derive(Event)`, publish it, then subscribe.
+Minimal example: define an event with `derive(Event)`, subscribe, then publish.
+
+> **Note:** In fanout mode (no queue groups), subscribers only receive messages
+> published **after** they connect. Always start the subscriber before publishing.
 
 ```rust
 use futures::StreamExt;
@@ -33,10 +36,21 @@ struct UserCreated {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1) Connect to Hermes
     let client = HermesClient::connect("http://127.0.0.1:4222").await?;
 
-    // 2) Publish
+    // 1) Subscribe first — fanout delivers only to active subscribers
+    let sub_client = client.clone();
+    let handle = tokio::spawn(async move {
+        let mut stream = sub_client.subscribe::<UserCreated>(&[]).await.unwrap();
+        while let Some(msg) = stream.next().await {
+            println!("received: {:?}", msg.unwrap());
+        }
+    });
+
+    // 2) Small delay so the subscription is registered on the broker
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 3) Publish
     client
         .publish(&UserCreated {
             id: "u_123".into(),
@@ -44,11 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    // 3) Subscribe
-    let mut stream = client.subscribe::<UserCreated>(&[]).await?;
-    if let Some(msg) = stream.next().await {
-        println!("received: {:?}", msg?);
-    }
+    // Wait a bit for delivery, then exit
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    handle.abort();
 
     Ok(())
 }

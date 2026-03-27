@@ -9,7 +9,7 @@
 //!
 //! Run a server from a bound `TcpListener`:
 //!
-//! ```rust
+//! ```no_run
 //! use tokio::net::TcpListener;
 //!
 //! #[tokio::main]
@@ -22,7 +22,7 @@
 //!
 //! Run with explicit configuration:
 //!
-//! ```rust
+//! ```no_run
 //! use tokio::net::TcpListener;
 //! use hermes_server::config::ServerConfig;
 //!

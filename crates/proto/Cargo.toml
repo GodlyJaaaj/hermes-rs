@@ -1,7 +1,7 @@
 [package]
 name = "hermes-broker-proto"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Protobuf and gRPC generated types/services for the Hermes broker."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/GodlyJaaaj/hermes-rs"

@@ -1,0 +1,24 @@
+[package]
+name = "hermes-integration-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hermes-client = { package = "hermes-broker-client", path = "../client" }
+hermes-server = { package = "hermes-broker-server", path = "../server" }
+hermes-core = { package = "hermes-broker-core", path = "../core" }
+hermes-proto = { package = "hermes-broker-proto", path = "../proto" }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+criterion = { workspace = true }
+ratatui = "0.30"
+crossterm = "0.29"
+
+[[bench]]
+name = "grpc_benchmarks"
+harness = false

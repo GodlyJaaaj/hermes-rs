@@ -4,7 +4,7 @@
 //! full-screen terminal UI to publish, subscribe, ack, nack, etc.
 //!
 //! Run:
-//!   cargo run -p hermes-client --example repl
+//!   cargo run -p hermes-integration-tests --example repl
 //!
 //! Press F1 for help inside the TUI.
 
