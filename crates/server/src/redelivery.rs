@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use hermes_proto::{DurableServerMessage, Redelivery};
 use hermes_store::MessageStore;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::broker::BrokerEngine;
 
@@ -33,8 +33,6 @@ pub fn spawn_redelivery_loop(
                     continue;
                 }
             };
-
-            info!(consumer_count = consumers.len(), "redelivery: checking for expired messages");
 
             for consumer_name in &consumers {
                 let now_ms = now_ms();
