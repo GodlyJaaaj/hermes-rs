@@ -222,8 +222,7 @@ impl BrokerEngine {
         for mut entry in self.wildcard_subscriptions.iter_mut() {
             if entry.value().pattern.matches(&subject) {
                 let we = entry.value_mut();
-                total +=
-                    self.deliver_to_subscribers(&mut we.subscribers, arc_env, subject_json);
+                total += self.deliver_to_subscribers(&mut we.subscribers, arc_env, subject_json);
             }
         }
         total
@@ -292,10 +291,9 @@ impl BrokerEngine {
 
             // Clone once per attempt to add the debug header.
             let mut tagged_envelope = (**arc_env).clone();
-            tagged_envelope.headers.insert(
-                DEBUG_QUEUE_GROUP_HEADER.to_string(),
-                group_name.to_string(),
-            );
+            tagged_envelope
+                .headers
+                .insert(DEBUG_QUEUE_GROUP_HEADER.to_string(), group_name.to_string());
 
             match members[idx].sender.try_send(Arc::new(tagged_envelope)) {
                 Ok(()) => return 1,
@@ -411,8 +409,7 @@ impl BrokerEngine {
 
         let (tx, rx) = mpsc::channel(max_in_flight as usize);
 
-        let subject_pattern =
-            Subject::from_json(&subject_json).unwrap_or_else(|_| Subject::new());
+        let subject_pattern = Subject::from_json(&subject_json).unwrap_or_else(|_| Subject::new());
 
         let consumer = DurableConsumer {
             consumer_name: consumer_name.clone(),
@@ -453,22 +450,18 @@ impl BrokerEngine {
 
             let msg = if stored.attempt > 1 {
                 DurableServerMessage {
-                    msg: Some(
-                        hermes_proto::durable_server_message::Msg::Redelivery(
-                            hermes_proto::Redelivery {
-                                envelope: Some(stored.envelope),
-                                attempt: stored.attempt,
-                            },
-                        ),
-                    ),
+                    msg: Some(hermes_proto::durable_server_message::Msg::Redelivery(
+                        hermes_proto::Redelivery {
+                            envelope: Some(stored.envelope),
+                            attempt: stored.attempt,
+                        },
+                    )),
                 }
             } else {
                 DurableServerMessage {
-                    msg: Some(
-                        hermes_proto::durable_server_message::Msg::Envelope(
-                            stored.envelope,
-                        ),
-                    ),
+                    msg: Some(hermes_proto::durable_server_message::Msg::Envelope(
+                        stored.envelope,
+                    )),
                 }
             };
 
@@ -745,8 +738,7 @@ mod tests {
         assert!(try_recv(&mut rx).is_some());
 
         // Publish ["job", 42, "logs"] — matches
-        let envelope2 =
-            make_envelope(&Subject::new().str("job").int(42).str("logs").to_json());
+        let envelope2 = make_envelope(&Subject::new().str("job").int(42).str("logs").to_json());
         assert_eq!(engine.publish(&envelope2), 1);
         assert!(try_recv(&mut rx).is_some());
 

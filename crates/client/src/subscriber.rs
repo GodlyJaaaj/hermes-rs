@@ -60,9 +60,7 @@ pub(crate) async fn subscribe_group<G: EventGroup>(
         let mapped = inner.map(move |result| {
             let envelope = result.map_err(ClientError::Rpc)?;
             let subject = Subject::from_json(&envelope.subject).map_err(|e| {
-                ClientError::Decode(hermes_core::DecodeError::InvalidSubject(
-                    e.to_string(),
-                ))
+                ClientError::Decode(hermes_core::DecodeError::InvalidSubject(e.to_string()))
             })?;
             G::decode_event(&subject, &envelope.payload).map_err(ClientError::Decode)
         });

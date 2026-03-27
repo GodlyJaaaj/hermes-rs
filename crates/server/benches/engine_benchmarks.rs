@@ -6,9 +6,7 @@ use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hermes_core::Subject;
 use hermes_proto::EventEnvelope;
 use hermes_server::broker::BrokerEngine;
@@ -30,12 +28,8 @@ fn make_envelope(subject_json: &str, payload_size: usize) -> EventEnvelope {
 
 fn drain_receiver(rx: &mut SubscriptionReceiver) {
     match rx {
-        SubscriptionReceiver::Fanout(r) => {
-            while r.try_recv().is_ok() {}
-        }
-        SubscriptionReceiver::QueueGroup(r) => {
-            while r.try_recv().is_ok() {}
-        }
+        SubscriptionReceiver::Fanout(r) => while r.try_recv().is_ok() {},
+        SubscriptionReceiver::QueueGroup(r) => while r.try_recv().is_ok() {},
     }
 }
 
@@ -199,10 +193,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
     // Exact match: subscriber on ["bench","wc","test"], publish same
     group.bench_function("exact_match", |b| {
         let engine = BrokerEngine::new(16384);
-        let subject = Subject::new()
-            .str("bench")
-            .str("wc")
-            .str("test");
+        let subject = Subject::new().str("bench").str("wc").str("test");
         let subject_json = subject.to_json();
         let envelope = make_envelope(&subject_json, 64);
 
@@ -224,17 +215,11 @@ fn bench_wildcard_matching(c: &mut Criterion) {
     // Single wildcard: subscriber on ["bench","*","test"]
     group.bench_function("single_wildcard", |b| {
         let engine = BrokerEngine::new(16384);
-        let sub_pattern = Subject::new()
-            .str("bench")
-            .any()
-            .str("test");
+        let sub_pattern = Subject::new().str("bench").any().str("test");
         let sub_json = sub_pattern.to_json();
         let _rx = engine.subscribe(sub_json, vec![]).1;
 
-        let pub_subject = Subject::new()
-            .str("bench")
-            .str("wc")
-            .str("test");
+        let pub_subject = Subject::new().str("bench").str("wc").str("test");
         let pub_json = pub_subject.to_json();
         let envelope = make_envelope(&pub_json, 64);
 
@@ -243,14 +228,12 @@ fn bench_wildcard_matching(c: &mut Criterion) {
         // Let's re-do this properly
         drop(_rx);
 
-        let mut rx = engine.subscribe(
-            Subject::new()
-                .str("bench")
-                .any()
-                .str("test")
-                .to_json(),
-            vec![],
-        ).1;
+        let mut rx = engine
+            .subscribe(
+                Subject::new().str("bench").any().str("test").to_json(),
+                vec![],
+            )
+            .1;
 
         b.iter_custom(|iters| {
             let start = std::time::Instant::now();
@@ -268,16 +251,10 @@ fn bench_wildcard_matching(c: &mut Criterion) {
     // Multi-wildcard: subscriber on ["bench",">"]
     group.bench_function("multi_wildcard", |b| {
         let engine = BrokerEngine::new(16384);
-        let sub_json = Subject::new()
-            .str("bench")
-            .rest()
-            .to_json();
+        let sub_json = Subject::new().str("bench").rest().to_json();
         let mut rx = engine.subscribe(sub_json, vec![]).1;
 
-        let pub_subject = Subject::new()
-            .str("bench")
-            .str("wc")
-            .str("test");
+        let pub_subject = Subject::new().str("bench").str("wc").str("test");
         let pub_json = pub_subject.to_json();
         let envelope = make_envelope(&pub_json, 64);
 
@@ -309,10 +286,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
             })
             .collect();
 
-        let pub_subject = Subject::new()
-            .str("bench")
-            .str("wc")
-            .str("test");
+        let pub_subject = Subject::new().str("bench").str("wc").str("test");
         let pub_json = pub_subject.to_json();
         let envelope = make_envelope(&pub_json, 64);
 
@@ -347,10 +321,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for i in 0..num_ops {
-                    let sub = Subject::new()
-                        .str("churn")
-                        .str(&i.to_string())
-                        .to_json();
+                    let sub = Subject::new().str("churn").str(&i.to_string()).to_json();
                     let _ = black_box(engine.subscribe(sub, vec![]));
                 }
             }
@@ -364,10 +335,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for i in 0..num_ops {
-                    let sub_json = Subject::new()
-                        .str("churn")
-                        .str(&i.to_string())
-                        .to_json();
+                    let sub_json = Subject::new().str("churn").str(&i.to_string()).to_json();
                     let (id, _rx) = engine.subscribe(sub_json.clone(), vec![]);
                     engine.unsubscribe(&sub_json, id);
                 }
@@ -383,10 +351,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for _ in 0..num_ops {
-                    let _ = black_box(engine.subscribe(
-                        sub_json.clone(),
-                        vec!["workers".into()],
-                    ));
+                    let _ = black_box(engine.subscribe(sub_json.clone(), vec!["workers".into()]));
                 }
             }
             start.elapsed()

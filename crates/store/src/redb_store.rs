@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use hermes_proto::EventEnvelope;
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use tracing::debug;
 
 use crate::error::StoreError;

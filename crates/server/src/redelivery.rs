@@ -109,14 +109,12 @@ pub fn spawn_redelivery_loop(
                     }
 
                     let msg = DurableServerMessage {
-                        msg: Some(
-                            hermes_proto::durable_server_message::Msg::Redelivery(
-                                Redelivery {
-                                    envelope: Some(stored.envelope.clone()),
-                                    attempt: stored.attempt,
-                                },
-                            ),
-                        ),
+                        msg: Some(hermes_proto::durable_server_message::Msg::Redelivery(
+                            Redelivery {
+                                envelope: Some(stored.envelope.clone()),
+                                attempt: stored.attempt,
+                            },
+                        )),
                     };
 
                     if consumer.sender.try_send(msg).is_err() {

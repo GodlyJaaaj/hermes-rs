@@ -34,11 +34,7 @@ impl BatchPublisher {
     }
 
     /// Send a raw envelope (explicit subject + payload) through the batch stream.
-    pub async fn send_raw(
-        &self,
-        subject: &Subject,
-        payload: Vec<u8>,
-    ) -> Result<(), ClientError> {
+    pub async fn send_raw(&self, subject: &Subject, payload: Vec<u8>) -> Result<(), ClientError> {
         let envelope = EventEnvelope {
             id: Uuid::now_v7().to_string(),
             subject: subject.to_json(),

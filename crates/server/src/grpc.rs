@@ -74,46 +74,42 @@ impl Broker for BrokerService {
 
         tokio::spawn(async move {
             match receiver {
-                SubscriptionReceiver::Fanout(mut rx) => {
-                    loop {
-                        select! {
-                            result = rx.recv() => {
-                                match result {
-                                    Ok(arc_env) => {
-                                        let env = Arc::unwrap_or_clone(arc_env);
-                                        if tx_out.send(Ok(env)).await.is_err() {
-                                            break;
-                                        }
+                SubscriptionReceiver::Fanout(mut rx) => loop {
+                    select! {
+                        result = rx.recv() => {
+                            match result {
+                                Ok(arc_env) => {
+                                    let env = Arc::unwrap_or_clone(arc_env);
+                                    if tx_out.send(Ok(env)).await.is_err() {
+                                        break;
                                     }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(subject, "subscriber lagged, missed {n} messages");
-                                        continue;
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                            }
-                            _ = tx_out.closed() => break,
-                        }
-                    }
-                }
-                SubscriptionReceiver::QueueGroup(mut rx) => {
-                    loop {
-                        select! {
-                            msg = rx.recv() => {
-                                match msg {
-                                    Some(arc_env) => {
-                                        let env = Arc::unwrap_or_clone(arc_env);
-                                        if tx_out.send(Ok(env)).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    None => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(subject, "subscriber lagged, missed {n} messages");
+                                    continue;
                                 }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                            _ = tx_out.closed() => break,
                         }
+                        _ = tx_out.closed() => break,
                     }
-                }
+                },
+                SubscriptionReceiver::QueueGroup(mut rx) => loop {
+                    select! {
+                        msg = rx.recv() => {
+                            match msg {
+                                Some(arc_env) => {
+                                    let env = Arc::unwrap_or_clone(arc_env);
+                                    if tx_out.send(Ok(env)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = tx_out.closed() => break,
+                    }
+                },
             }
             engine.unsubscribe(&subject, id);
             debug!(subject, %id, "subscriber stream ended");

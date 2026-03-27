@@ -4,9 +4,7 @@
 
 use std::time::Duration;
 
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::StreamExt;
 use hermes_client::HermesClient;
 use hermes_core::Subject;
@@ -109,10 +107,7 @@ fn bench_e2e_latency(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let start = std::time::Instant::now();
-                    client
-                        .publish_raw(&subject, payload.clone())
-                        .await
-                        .unwrap();
+                    client.publish_raw(&subject, payload.clone()).await.unwrap();
                     let _ = stream.next().await.unwrap().unwrap();
                     total += start.elapsed();
                 }
@@ -193,11 +188,7 @@ fn bench_grpc_fanout(c: &mut Criterion) {
 
                             // Wait for all subscribers
                             for handle in handles {
-                                let _ = tokio::time::timeout(
-                                    Duration::from_secs(10),
-                                    handle,
-                                )
-                                .await;
+                                let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
                             }
 
                             total += start.elapsed();

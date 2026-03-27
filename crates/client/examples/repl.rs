@@ -21,13 +21,13 @@ use crossterm::terminal::{
 };
 use crossterm::{ExecutableCommand, execute};
 use futures::StreamExt;
+use hermes_client::HermesClient;
+use hermes_core::{Event as BrokerEvent, Subject, event_group};
+use ratatui::Terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use ratatui::Terminal;
-use hermes_client::HermesClient;
-use hermes_core::{Event as BrokerEvent, Subject, event_group};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -307,10 +307,7 @@ async fn cmd_pub(client: &HermesClient, app: &mut App, args: &[&str]) {
     let payload = payload_str.as_bytes().to_vec();
 
     match client.publish_raw(&subject, payload).await {
-        Ok(()) => app.log(
-            LogKind::Published,
-            format!("[{dot_subject}] {payload_str}"),
-        ),
+        Ok(()) => app.log(LogKind::Published, format!("[{dot_subject}] {payload_str}")),
         Err(e) => app.log(LogKind::Error, format!("publish failed: {e}")),
     }
 }
@@ -329,10 +326,7 @@ async fn cmd_chat(client: &HermesClient, app: &mut App, args: &[&str]) {
         })
         .await
     {
-        Ok(()) => app.log(
-            LogKind::Published,
-            format!("ChatMessage [{user}]: {text}"),
-        ),
+        Ok(()) => app.log(LogKind::Published, format!("ChatMessage [{user}]: {text}")),
         Err(e) => app.log(LogKind::Error, format!("publish failed: {e}")),
     }
 }
@@ -441,10 +435,7 @@ async fn cmd_batch(client: &HermesClient, app: &mut App, args: &[&str]) {
 
 async fn cmd_dpub(client: &HermesClient, app: &mut App, args: &[&str]) {
     if args.len() < 2 {
-        app.log(
-            LogKind::Error,
-            "Usage: dpub <subject> <payload...>".into(),
-        );
+        app.log(LogKind::Error, "Usage: dpub <subject> <payload...>".into());
         return;
     }
     let dot_subject = args[0];
@@ -608,7 +599,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     // Body: sidebar + messages
     let horizontal = Layout::horizontal([
         Constraint::Length(26), // sidebar
-        Constraint::Min(30),   // messages
+        Constraint::Min(30),    // messages
     ]);
     let [sidebar_area, messages_area] = horizontal.areas(body_area);
 
@@ -620,10 +611,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
             .iter()
             .map(|(id, desc)| {
                 ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("#{id} "),
-                        Style::default().fg(Color::Yellow),
-                    ),
+                    Span::styled(format!("#{id} "), Style::default().fg(Color::Yellow)),
                     Span::raw(desc.as_str()),
                 ]))
             })
@@ -655,8 +643,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     let inner_height = messages_area.height.saturating_sub(2) as usize;
     let total = app.messages.len();
     let start = if total > inner_height {
-        app.scroll_offset
-            .min(total.saturating_sub(inner_height))
+        app.scroll_offset.min(total.saturating_sub(inner_height))
     } else {
         0
     };
@@ -755,8 +742,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame, area: Rect) {
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
-    let clear =
-        Paragraph::new("").block(Block::default().style(Style::default().bg(Color::Black)));
+    let clear = Paragraph::new("").block(Block::default().style(Style::default().bg(Color::Black)));
     frame.render_widget(clear, popup_area);
 
     let help_lines = vec![
@@ -889,11 +875,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Keyboard events from blocking thread
     let (key_tx, mut key_rx) = mpsc::channel::<Event>(64);
-    std::thread::spawn(move || loop {
-        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(ev) = event::read() {
-                if key_tx.blocking_send(ev).is_err() {
-                    break;
+    std::thread::spawn(move || {
+        loop {
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(ev) = event::read() {
+                    if key_tx.blocking_send(ev).is_err() {
+                        break;
+                    }
                 }
             }
         }
