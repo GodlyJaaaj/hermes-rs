@@ -1,0 +1,23 @@
+[package]
+name = "scylla-broker-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scylla-broker-core = { path = "../core" }
+scylla-broker-proto = { path = "../proto" }
+scylla-broker-store = { path = "../store" }
+tonic = { workspace = true }
+tonic-reflection = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+scylla-broker-client = { path = "../client" }
+futures = { workspace = true }
+serde = { workspace = true }

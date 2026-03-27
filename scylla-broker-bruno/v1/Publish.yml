@@ -1,0 +1,20 @@
+info:
+  name: Publish
+  type: grpc
+  seq: 2
+
+grpc:
+  url: "{{LOCAL_ENDPOINT}}"
+  method: /scylla.broker.v1.Broker/Publish
+  methodType: client-streaming
+  message: |-
+    {
+      "id": "antea",
+      "subject": "[\"test\",\"task\"]",
+      "payload": "",
+      "headers": [
+        {}
+      ],
+      "timestamp_nanos": 545
+    }
+  auth: inherit

@@ -1,0 +1,8 @@
+name: local
+variables:
+  - name: IP
+    value: localhost
+  - name: PORT
+    value: "4222"
+  - name: LOCAL_ENDPOINT
+    value: "{{IP}}:{{PORT}}"

@@ -1,0 +1,22 @@
+[package]
+name = "scylla-broker-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scylla-broker-core = { path = "../core" }
+scylla-broker-proto = { path = "../proto" }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+scylla-broker-server = { path = "../server" }
+scylla-broker-proto = { path = "../proto" }
+tempfile = { workspace = true }
+ratatui = "0.30"
+crossterm = "0.29"
