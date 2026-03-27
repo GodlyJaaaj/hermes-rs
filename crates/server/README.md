@@ -10,7 +10,7 @@ Add the dependency:
 
 ```toml
 [dependencies]
-hermes-broker-server = "0.1.0"
+hermes-broker-server = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
