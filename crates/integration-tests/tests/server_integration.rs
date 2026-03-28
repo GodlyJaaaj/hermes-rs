@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use hermes_client::HermesClient;
-use hermes_core::{Event, Segment, Subject, event_group};
+use hermes_core::{Event, Subject, event_group};
 use hermes_server::config::ServerConfig;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
