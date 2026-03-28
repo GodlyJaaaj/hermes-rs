@@ -30,13 +30,12 @@ pub struct DurableConsumer {
     pub max_in_flight: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Wildcard entry
-// ---------------------------------------------------------------------------
-
-/// A wildcard subscription: parsed pattern + pre-partitioned subscribers.
-struct WildcardEntry {
-    subscribers: SubjectSubscribers,
+impl DurableConsumer {
+    /// Check if this consumer matches the given subject (exact or pattern).
+    fn matches(&self, subject_bytes: &[u8], subject: Option<&Subject>) -> bool {
+        self.subject_bytes == subject_bytes
+            || subject.is_some_and(|s| self.subject_pattern.matches(s))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -47,7 +46,7 @@ pub struct BrokerEngine {
     /// Exact subscriptions: Subject -> pre-partitioned subscribers (O(1) lookup).
     exact_subscriptions: DashMap<Subject, SubjectSubscribers>,
     /// Wildcard subscriptions keyed by their pattern Subject.
-    wildcard_subscriptions: DashMap<Subject, WildcardEntry>,
+    wildcard_subscriptions: DashMap<Subject, SubjectSubscribers>,
     channel_capacity: usize,
     /// Optional store for durable mode. None = fire-and-forget only.
     store: Option<Arc<dyn MessageStore>>,
@@ -58,25 +57,13 @@ pub struct BrokerEngine {
 }
 
 impl BrokerEngine {
-    /// Create a fire-and-forget only engine.
-    pub fn new(channel_capacity: usize) -> Self {
+    /// Create an engine. Pass `None` for fire-and-forget only, or `Some(store)` for durable.
+    pub fn new(channel_capacity: usize, store: Option<Arc<dyn MessageStore>>) -> Self {
         Self {
             exact_subscriptions: DashMap::new(),
             wildcard_subscriptions: DashMap::new(),
             channel_capacity,
-            store: None,
-            durable_consumers: DashMap::new(),
-            rr_counter: AtomicU64::new(0),
-        }
-    }
-
-    /// Create an engine with durable support.
-    pub fn with_store(channel_capacity: usize, store: Arc<dyn MessageStore>) -> Self {
-        Self {
-            exact_subscriptions: DashMap::new(),
-            wildcard_subscriptions: DashMap::new(),
-            channel_capacity,
-            store: Some(store),
+            store,
             durable_consumers: DashMap::new(),
             rr_counter: AtomicU64::new(0),
         }
@@ -84,6 +71,11 @@ impl BrokerEngine {
 
     pub fn store(&self) -> Option<&Arc<dyn MessageStore>> {
         self.store.as_ref()
+    }
+
+    /// Return the next round-robin index for a group of `count` members.
+    fn next_round_robin(&self, count: usize) -> usize {
+        self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize % count
     }
 
     // -----------------------------------------------------------------------
@@ -101,81 +93,43 @@ impl BrokerEngine {
     ) -> (SubscriptionId, SubscriptionReceiver) {
         let id = Uuid::now_v7();
 
-        let receiver = if subject.is_pattern() {
-            self.subscribe_wildcard(id, subject.clone(), &queue_groups)
+        let map = if subject.is_pattern() {
+            &self.wildcard_subscriptions
         } else {
-            self.subscribe_exact(id, subject.clone(), &queue_groups)
+            &self.exact_subscriptions
+        };
+
+        let mut entry = map
+            .entry(subject.clone())
+            .or_insert_with(|| SubjectSubscribers::new(self.channel_capacity));
+
+        let receiver = if queue_groups.is_empty() {
+            SubscriptionReceiver::Fanout(entry.subscribe_fanout())
+        } else {
+            let (tx, rx) = mpsc::channel(self.channel_capacity);
+            entry.add_to_groups(QueueGroupMember { id, sender: tx }, &queue_groups);
+            SubscriptionReceiver::QueueGroup(rx)
         };
 
         debug!(subject = %subject, %id, "new subscription");
         (id, receiver)
     }
 
-    fn subscribe_exact(
-        &self,
-        id: SubscriptionId,
-        subject: Subject,
-        queue_groups: &[String],
-    ) -> SubscriptionReceiver {
-        let mut entry = self
-            .exact_subscriptions
-            .entry(subject)
-            .or_insert_with(|| SubjectSubscribers::new(self.channel_capacity));
-
-        if queue_groups.is_empty() {
-            SubscriptionReceiver::Fanout(entry.subscribe_fanout())
-        } else {
-            let (tx, rx) = mpsc::channel(self.channel_capacity);
-            let member = QueueGroupMember { id, sender: tx };
-            entry.add_to_groups(member, queue_groups);
-            SubscriptionReceiver::QueueGroup(rx)
-        }
-    }
-
-    fn subscribe_wildcard(
-        &self,
-        id: SubscriptionId,
-        subject: Subject,
-        queue_groups: &[String],
-    ) -> SubscriptionReceiver {
-        let mut entry = self
-            .wildcard_subscriptions
-            .entry(subject)
-            .or_insert_with(|| WildcardEntry {
-                subscribers: SubjectSubscribers::new(self.channel_capacity),
-            });
-
-        if queue_groups.is_empty() {
-            SubscriptionReceiver::Fanout(entry.subscribers.subscribe_fanout())
-        } else {
-            let (tx, rx) = mpsc::channel(self.channel_capacity);
-            let member = QueueGroupMember { id, sender: tx };
-            entry.subscribers.add_to_groups(member, queue_groups);
-            SubscriptionReceiver::QueueGroup(rx)
-        }
-    }
-
     /// Unsubscribe by id (queue group members only — fanout subscribers
     /// are automatically removed when their broadcast receiver is dropped).
     pub fn unsubscribe(&self, subject: &Subject, id: SubscriptionId) {
-        if let Some(mut subs) = self.exact_subscriptions.get_mut(subject) {
-            subs.remove_from_groups(id);
-            if subs.is_empty() {
-                drop(subs);
-                self.exact_subscriptions.remove(subject);
-            }
-            debug!(subject = %subject, %id, "unsubscribed");
-            return;
-        }
-
-        if let Some(mut we) = self.wildcard_subscriptions.get_mut(subject) {
-            we.subscribers.remove_from_groups(id);
-            if we.subscribers.is_empty() {
-                drop(we);
-                self.wildcard_subscriptions.remove(subject);
+        // Try exact first, then wildcard.
+        for map in [&self.exact_subscriptions, &self.wildcard_subscriptions] {
+            if let Some(mut subs) = map.get_mut(subject) {
+                subs.remove_from_groups(id);
+                if subs.is_empty() {
+                    drop(subs);
+                    map.remove(subject);
+                }
+                debug!(subject = %subject, %id, "unsubscribed");
+                return;
             }
         }
-        debug!(subject = %subject, %id, "unsubscribed");
     }
 
     // -----------------------------------------------------------------------
@@ -189,108 +143,61 @@ impl BrokerEngine {
             Ok(s) => s,
             Err(_) => return 0,
         };
-        // Wrap once in Arc — all fanout + queue-group members share this.
         let arc_env = Arc::new(envelope.clone());
-
         let mut delivered: usize = 0;
 
         // 1) Exact match (O(1)).
-        delivered += self.publish_exact(&subject, &arc_env);
+        if let Some(mut subs) = self.exact_subscriptions.get_mut(&subject) {
+            delivered += self.deliver(&mut subs, &arc_env, &subject);
+        }
 
         // 2) Wildcard match (iterate patterns).
-        delivered += self.publish_wildcard(&subject, &arc_env);
+        for mut entry in self.wildcard_subscriptions.iter_mut() {
+            if entry.key().matches(&subject) {
+                trace!(subject = %subject, pattern = %entry.key(), "wildcard match");
+                delivered += self.deliver(entry.value_mut(), &arc_env, &subject);
+            }
+        }
 
         debug!(subject = %subject, id = %envelope.id, delivered, "publish completed");
         delivered
     }
 
-    fn publish_exact(&self, subject: &Subject, arc_env: &Arc<EventEnvelope>) -> usize {
-        let Some(mut subs) = self.exact_subscriptions.get_mut(subject) else {
-            trace!(subject = %subject, "no exact subscribers");
-            return 0;
-        };
-        self.deliver_to_subscribers(&mut subs, arc_env, subject)
-    }
-
-    fn publish_wildcard(&self, subject: &Subject, arc_env: &Arc<EventEnvelope>) -> usize {
-        if self.wildcard_subscriptions.is_empty() {
-            return 0;
-        }
-
-        let mut total = 0;
-        for mut entry in self.wildcard_subscriptions.iter_mut() {
-            if entry.key().matches(subject) {
-                trace!(subject = %subject, pattern = %entry.key(), "wildcard match");
-                let we = entry.value_mut();
-                total += self.deliver_to_subscribers(&mut we.subscribers, arc_env, subject);
-            }
-        }
-        total
-    }
-
-    /// Deliver an envelope to pre-partitioned subscribers.
-    fn deliver_to_subscribers(
+    /// Deliver an envelope to a subject's subscribers (fanout broadcast + queue groups).
+    fn deliver(
         &self,
         subs: &mut SubjectSubscribers,
         arc_env: &Arc<EventEnvelope>,
         subject: &Subject,
     ) -> usize {
-        let fanout_count = self.deliver_fanout(&subs.fanout, arc_env);
-        let group_count = self.deliver_groups(&mut subs.groups, arc_env, subject);
-        fanout_count + group_count
-    }
+        // Fanout broadcast.
+        let mut count = if subs.fanout.receiver_count() > 0 {
+            subs.fanout.send(Arc::clone(arc_env)).unwrap_or(0)
+        } else {
+            0
+        };
 
-    /// Broadcast to all fanout subscribers via the broadcast channel.
-    /// Returns the number of receivers that received the message.
-    fn deliver_fanout(
-        &self,
-        fanout: &tokio::sync::broadcast::Sender<Arc<EventEnvelope>>,
-        arc_env: &Arc<EventEnvelope>,
-    ) -> usize {
-        if fanout.receiver_count() == 0 {
-            return 0;
-        }
-        let count = fanout.send(Arc::clone(arc_env)).unwrap_or(0);
-        trace!(receivers = count, "fanout delivered");
-        count
-    }
-
-    /// Round-robin dispatch to each queue group. Removes dead members in-place.
-    fn deliver_groups(
-        &self,
-        groups: &mut std::collections::HashMap<String, Vec<QueueGroupMember>>,
-        arc_env: &Arc<EventEnvelope>,
-        subject: &Subject,
-    ) -> usize {
-        let mut delivered: usize = 0;
-        groups.retain(|_group, members| {
-            if members.is_empty() {
-                return false;
+        // Queue groups: round-robin one member per group, prune dead members.
+        subs.groups.retain(|_group, members| {
+            if !members.is_empty() {
+                count += self.deliver_to_group(members, arc_env, subject);
             }
-            delivered += self.deliver_one_group(members, arc_env, subject);
             !members.is_empty()
         });
-        delivered
-    }
 
-    /// Return the next round-robin index for a group of `count` members.
-    fn next_round_robin(&self, count: usize) -> usize {
-        self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize % count
+        count
     }
 
     /// Pick one member via round-robin. If the picked member is dead, try the
     /// next one. Returns 0 or 1.
-    fn deliver_one_group(
+    fn deliver_to_group(
         &self,
         members: &mut Vec<QueueGroupMember>,
         arc_env: &Arc<EventEnvelope>,
         subject: &Subject,
     ) -> usize {
+        let start = self.next_round_robin(members.len());
         let len = members.len();
-        if len == 0 {
-            return 0;
-        }
-        let start = self.next_round_robin(len);
 
         for i in 0..len {
             if members.is_empty() {
@@ -304,16 +211,10 @@ impl BrokerEngine {
                     return 1;
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!(
-                        subject = %subject,
-                        id = %members[idx].id,
-                        "queue group member full, trying next"
-                    );
-                    continue;
+                    warn!(subject = %subject, id = %members[idx].id, "queue group member full, trying next");
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     members.swap_remove(idx);
-                    continue;
                 }
             }
         }
@@ -327,14 +228,9 @@ impl BrokerEngine {
     /// Persist a message and dispatch to fire-and-forget + durable subscribers.
     pub fn publish_durable(&self, envelope: &EventEnvelope) -> Result<usize, StoreError> {
         let store = self.store.as_ref().ok_or(StoreError::NotConfigured)?;
-
-        // Persist BEFORE dispatch.
         store.persist(envelope)?;
 
-        // Fire-and-forget subscribers.
         let delivered = self.publish(envelope);
-
-        // Durable consumers.
         self.dispatch_to_durable_consumers(store, envelope);
 
         debug!(id = %envelope.id, delivered, "durable publish completed");
@@ -351,13 +247,13 @@ impl BrokerEngine {
         let subject = Subject::from_bytes(&envelope.subject).ok();
 
         // Partition matching consumers into fanout (no groups) and per-group buckets.
-        let mut fanout: Vec<(String, u32, mpsc::Sender<DurableServerMessage>)> = Vec::new();
+        let mut targets: Vec<(String, u32, mpsc::Sender<DurableServerMessage>)> = Vec::new();
         let mut groups: HashMap<String, Vec<(String, u32, mpsc::Sender<DurableServerMessage>)>> =
             HashMap::new();
 
         for entry in self.durable_consumers.iter() {
             let c = entry.value();
-            if !self.consumer_matches(c, &envelope.subject, subject.as_ref()) {
+            if !c.matches(&envelope.subject, subject.as_ref()) {
                 continue;
             }
             let tuple = (
@@ -366,7 +262,7 @@ impl BrokerEngine {
                 c.sender.clone(),
             );
             if c.queue_groups.is_empty() {
-                fanout.push(tuple);
+                targets.push(tuple);
             } else {
                 for group in &c.queue_groups {
                     groups.entry(group.clone()).or_default().push(tuple.clone());
@@ -374,19 +270,17 @@ impl BrokerEngine {
             }
         }
 
-        // Select one consumer per queue group via shared round-robin.
+        // Select one consumer per queue group via round-robin.
         for members in groups.into_values() {
             let idx = self.next_round_robin(members.len());
             if let Some(picked) = members.into_iter().nth(idx) {
-                fanout.push(picked);
+                targets.push(picked);
             }
         }
 
         // Dispatch to all selected consumers.
-        for (name, ack_timeout_secs, sender) in &fanout {
+        for (name, ack_timeout_secs, sender) in &targets {
             let deadline = now_ms() + u64::from(*ack_timeout_secs) * 1000;
-
-            trace!(consumer = %name, id = %envelope.id, "dispatching to durable consumer");
 
             if let Err(e) = store.mark_delivered(&envelope.id, name, deadline) {
                 warn!(consumer = %name, id = %envelope.id, "failed to mark delivered: {e}");
@@ -405,21 +299,6 @@ impl BrokerEngine {
         }
     }
 
-    fn consumer_matches(
-        &self,
-        consumer: &DurableConsumer,
-        subject_bytes: &[u8],
-        subject: Option<&Subject>,
-    ) -> bool {
-        if consumer.subject_bytes == subject_bytes {
-            return true;
-        }
-        if let Some(subj) = subject {
-            return consumer.subject_pattern.matches(subj);
-        }
-        false
-    }
-
     // -----------------------------------------------------------------------
     // Durable subscribe
     // -----------------------------------------------------------------------
@@ -436,7 +315,6 @@ impl BrokerEngine {
         ack_timeout_secs: u32,
     ) -> Result<(u64, mpsc::Receiver<DurableServerMessage>), StoreError> {
         let store = self.store.as_ref().ok_or(StoreError::NotConfigured)?;
-
         store.register_consumer(&consumer_name, &subject_bytes, &queue_groups)?;
 
         let connection_id = self.rr_counter.fetch_add(1, Ordering::Relaxed);
@@ -445,19 +323,19 @@ impl BrokerEngine {
         let subject_pattern =
             Subject::from_bytes(&subject_bytes).unwrap_or_else(|_| Subject::new());
 
-        let consumer = DurableConsumer {
-            connection_id,
-            consumer_name: consumer_name.clone(),
-            subject_bytes: subject_bytes.clone(),
-            subject_pattern,
-            queue_groups: queue_groups.clone(),
-            sender: tx,
-            ack_timeout_secs,
-            max_in_flight,
-        };
-
-        self.durable_consumers
-            .insert(consumer_name.clone(), consumer);
+        self.durable_consumers.insert(
+            consumer_name.clone(),
+            DurableConsumer {
+                connection_id,
+                consumer_name: consumer_name.clone(),
+                subject_bytes: subject_bytes.clone(),
+                subject_pattern,
+                queue_groups,
+                sender: tx,
+                ack_timeout_secs,
+                max_in_flight,
+            },
+        );
 
         self.catch_up_durable(store, &consumer_name, max_in_flight, ack_timeout_secs);
 
@@ -482,6 +360,10 @@ impl BrokerEngine {
                 return;
             }
         };
+
+        if pending.is_empty() {
+            return;
+        }
 
         let pending_count = pending.len();
 
@@ -514,9 +396,7 @@ impl BrokerEngine {
             trace!(consumer_name, id = %msg_id, attempt, "catch-up: delivering pending message");
         }
 
-        if pending_count > 0 {
-            debug!(consumer_name, pending = pending_count, "catch-up completed");
-        }
+        debug!(consumer_name, pending = pending_count, "catch-up completed");
     }
 
     /// Remove a durable consumer (on disconnect).
@@ -574,6 +454,10 @@ mod tests {
     use super::*;
     use crate::subscription::SubscriptionReceiver;
 
+    fn engine() -> BrokerEngine {
+        BrokerEngine::new(16, None)
+    }
+
     fn make_envelope(subject: &Subject) -> EventEnvelope {
         EventEnvelope {
             id: "1".into(),
@@ -602,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fanout() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("Subject");
 
         let (_id1, mut rx1) = engine.subscribe(subject.clone(), vec![]);
@@ -618,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_group() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("QG");
 
         let (_id1, mut rx1) = engine.subscribe(subject.clone(), vec!["workers".into()]);
@@ -650,7 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_queue_groups() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("MultiQG");
 
         // Sub1 is in both "workers" and "loggers"
@@ -674,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fanout_and_queue_group_coexist() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("Mixed");
 
         // Fanout observer
@@ -696,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unsubscribe() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("Unsub");
 
         let (_id1, rx1) = engine.subscribe(subject.clone(), vec![]);
@@ -713,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_subscribers() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("NoOne");
         let envelope = make_envelope(&subject);
         assert_eq!(engine.publish(&envelope), 0);
@@ -721,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wildcard_subscription() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
 
         // Subscribe with wildcard: job.*.logs
         let pattern = Subject::new().str("job").any().str("logs");
@@ -750,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_wildcard_subscription() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
 
         // Subscribe with multi-wildcard: job.>
         let pattern = Subject::new().str("job").rest();
@@ -773,7 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dead_subscriber_cleanup() {
-        let engine = BrokerEngine::new(16);
+        let engine = engine();
         let subject = Subject::new().str("test").str("Dead");
 
         // Two fanout subscribers
@@ -795,13 +679,12 @@ mod tests {
 
     // -- Durable queue group tests --
 
-    fn make_durable_engine() -> BrokerEngine {
+    fn durable_engine() -> BrokerEngine {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = Arc::new(hermes_store::RedbMessageStore::open(tmp.path()).unwrap())
             as Arc<dyn MessageStore>;
-        // Leak tempfile so it lives for the test duration
-        std::mem::forget(tmp);
-        BrokerEngine::with_store(16, store)
+        std::mem::forget(tmp); // keep tempfile alive for test duration
+        BrokerEngine::new(16, Some(store))
     }
 
     fn make_durable_envelope(subject: &Subject, id: &str) -> EventEnvelope {
@@ -816,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_durable_queue_group_round_robin() {
-        let engine = make_durable_engine();
+        let engine = durable_engine();
         let subject = Subject::new().str("durable").str("qg");
         let subject_bytes = subject.to_bytes();
 
@@ -862,7 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_durable_no_queue_group_is_fanout() {
-        let engine = make_durable_engine();
+        let engine = durable_engine();
         let subject = Subject::new().str("durable").str("fanout");
         let subject_bytes = subject.to_bytes();
 
@@ -889,7 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_durable_mixed_fanout_and_queue_group() {
-        let engine = make_durable_engine();
+        let engine = durable_engine();
         let subject = Subject::new().str("durable").str("mixed");
         let subject_bytes = subject.to_bytes();
 
@@ -934,7 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_durable_multiple_queue_groups() {
-        let engine = make_durable_engine();
+        let engine = durable_engine();
         let subject = Subject::new().str("durable").str("multi");
         let subject_bytes = subject.to_bytes();
 

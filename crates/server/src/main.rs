@@ -27,14 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let engine = if let Some(ref store) = store {
-        Arc::new(BrokerEngine::with_store(
-            config.subscriber_channel_capacity,
-            store.clone(),
-        ))
-    } else {
-        Arc::new(BrokerEngine::new(config.subscriber_channel_capacity))
-    };
+    let engine = Arc::new(BrokerEngine::new(
+        config.subscriber_channel_capacity,
+        store.clone(),
+    ));
 
     // Token to cancel background loops on shutdown.
     let cancel = tokio_util::sync::CancellationToken::new();

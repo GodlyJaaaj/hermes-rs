@@ -44,7 +44,7 @@ fn bench_publish_fanout_scaling(c: &mut Criterion) {
     for k in [0, 1, 10, 100, 1000] {
         group.throughput(Throughput::Elements(num_messages));
         group.bench_with_input(BenchmarkId::new("subscribers", k), &k, |b, &k| {
-            let engine = BrokerEngine::new(16384);
+            let engine = BrokerEngine::new(16384, None);
             let subject = Subject::new().str("bench").str("fanout");
             let envelope = make_envelope(&subject, 128);
 
@@ -85,7 +85,7 @@ fn bench_publish_message_sizes(c: &mut Criterion) {
             BenchmarkId::new("bytes", payload_size),
             &payload_size,
             |b, &sz| {
-                let engine = BrokerEngine::new(16384);
+                let engine = BrokerEngine::new(16384, None);
                 let subject = Subject::new().str("bench").str("sizes");
                 let envelope = make_envelope(&subject, sz);
 
@@ -122,7 +122,7 @@ fn bench_queue_group_vs_fanout(c: &mut Criterion) {
 
     // Fanout: 10 subscribers, each gets every message
     group.bench_function("fanout_10", |b| {
-        let engine = BrokerEngine::new(16384);
+        let engine = BrokerEngine::new(16384, None);
         let subject = Subject::new().str("bench").str("fanout10");
         let envelope = make_envelope(&subject, 128);
 
@@ -147,7 +147,7 @@ fn bench_queue_group_vs_fanout(c: &mut Criterion) {
 
     // Queue group: 10 members, round-robin (one gets each message)
     group.bench_function("queue_group_10", |b| {
-        let engine = BrokerEngine::new(16384);
+        let engine = BrokerEngine::new(16384, None);
         let subject = Subject::new().str("bench").str("qg10");
         let envelope = make_envelope(&subject, 128);
 
@@ -184,7 +184,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
 
     // Exact match: subscriber on ["bench","wc","test"], publish same
     group.bench_function("exact_match", |b| {
-        let engine = BrokerEngine::new(16384);
+        let engine = BrokerEngine::new(16384, None);
         let subject = Subject::new().str("bench").str("wc").str("test");
         let envelope = make_envelope(&subject, 64);
 
@@ -205,7 +205,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
 
     // Single wildcard: subscriber on ["bench","*","test"]
     group.bench_function("single_wildcard", |b| {
-        let engine = BrokerEngine::new(16384);
+        let engine = BrokerEngine::new(16384, None);
         let sub_pattern = Subject::new().str("bench").any().str("test");
         let _rx = engine.subscribe(sub_pattern.clone(), vec![]).1;
 
@@ -236,7 +236,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
 
     // Multi-wildcard: subscriber on ["bench",">"]
     group.bench_function("multi_wildcard", |b| {
-        let engine = BrokerEngine::new(16384);
+        let engine = BrokerEngine::new(16384, None);
         let sub_subject = Subject::new().str("bench").rest();
         let mut rx = engine.subscribe(sub_subject, vec![]).1;
 
@@ -258,7 +258,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
 
     // No-match wildcard: wildcards exist but don't match the published subject
     group.bench_function("no_match_wildcard", |b| {
-        let engine = BrokerEngine::new(16384);
+        let engine = BrokerEngine::new(16384, None);
         // Add 100 wildcard subscriptions on OTHER subjects
         let _others: Vec<SubscriptionReceiver> = (0..100)
             .map(|i| {
@@ -297,7 +297,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
 
     group.bench_function("subscribe_only", |b| {
         b.iter_custom(|iters| {
-            let engine = BrokerEngine::new(8192);
+            let engine = BrokerEngine::new(8192, None);
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for i in 0..num_ops {
@@ -311,7 +311,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
 
     group.bench_function("subscribe_unsubscribe_cycle", |b| {
         b.iter_custom(|iters| {
-            let engine = BrokerEngine::new(8192);
+            let engine = BrokerEngine::new(8192, None);
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 for i in 0..num_ops {
@@ -326,7 +326,7 @@ fn bench_subscribe_unsubscribe_churn(c: &mut Criterion) {
 
     group.bench_function("subscribe_same_subject_qg", |b| {
         b.iter_custom(|iters| {
-            let engine = BrokerEngine::new(8192);
+            let engine = BrokerEngine::new(8192, None);
             let sub = Subject::new().str("churn").str("same");
             let start = std::time::Instant::now();
             for _ in 0..iters {
@@ -351,7 +351,7 @@ fn bench_publish_baseline(c: &mut Criterion) {
     group.throughput(Throughput::Elements(num_messages));
 
     group.bench_function("no_subscribers", |b| {
-        let engine = BrokerEngine::new(8192);
+        let engine = BrokerEngine::new(8192, None);
         let subject = Subject::new().str("bench").str("baseline");
         let envelope = make_envelope(&subject, 64);
 
@@ -363,7 +363,7 @@ fn bench_publish_baseline(c: &mut Criterion) {
     });
 
     group.bench_function("no_match_100_wildcards", |b| {
-        let engine = BrokerEngine::new(8192);
+        let engine = BrokerEngine::new(8192, None);
 
         // 100 wildcard subscriptions on other subjects
         let _others: Vec<SubscriptionReceiver> = (0..100)
@@ -398,7 +398,7 @@ fn bench_large_scale_fanout(c: &mut Criterion) {
     for k in [10_000_u64, 100_000] {
         group.throughput(Throughput::Elements(num_messages));
         group.bench_with_input(BenchmarkId::new("subscribers", k), &k, |b, &k| {
-            let engine = BrokerEngine::new(k as usize + 1024);
+            let engine = BrokerEngine::new(k as usize + 1024, None);
             let subject = Subject::new().str("bench").str("largefanout");
             let envelope = make_envelope(&subject, 128);
 
@@ -439,7 +439,7 @@ fn bench_lookup_throughput(c: &mut Criterion) {
             BenchmarkId::new("subscriptions", num_subs),
             &num_subs,
             |b, &n| {
-                let engine = BrokerEngine::new(n as usize + 1024);
+                let engine = BrokerEngine::new(n as usize + 1024, None);
 
                 // Create N subscriptions on different exact subjects
                 let _receivers: Vec<SubscriptionReceiver> = (0..n)
@@ -483,7 +483,7 @@ fn bench_large_scale_wildcards(c: &mut Criterion) {
             BenchmarkId::new("wildcard_patterns", num_patterns),
             &num_patterns,
             |b, &n| {
-                let engine = BrokerEngine::new(16384);
+                let engine = BrokerEngine::new(16384, None);
 
                 // Create N wildcard subscriptions: "sensor.{i}.*"
                 let _receivers: Vec<SubscriptionReceiver> = (0..n)

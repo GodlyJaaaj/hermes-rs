@@ -110,16 +110,10 @@ pub async fn run_with_shutdown(
             None
         };
 
-    let engine = if let Some(ref store) = store {
-        Arc::new(broker::BrokerEngine::with_store(
-            config.subscriber_channel_capacity,
-            store.clone(),
-        ))
-    } else {
-        Arc::new(broker::BrokerEngine::new(
-            config.subscriber_channel_capacity,
-        ))
-    };
+    let engine = Arc::new(broker::BrokerEngine::new(
+        config.subscriber_channel_capacity,
+        store.clone(),
+    ));
 
     // Token to cancel background loops on shutdown.
     let cancel = CancellationToken::new();
