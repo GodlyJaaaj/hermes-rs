@@ -19,6 +19,7 @@ uuid = { workspace = true }
 criterion = { workspace = true }
 ratatui = "0.30"
 crossterm = "0.29"
+clap = { version = "4", features = ["derive"] }
 
 [[bench]]
 name = "grpc_benchmarks"

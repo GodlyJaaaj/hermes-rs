@@ -24,6 +24,7 @@ pub struct DurableConsumer {
     pub consumer_name: String,
     pub subject_bytes: Vec<u8>,
     pub subject_pattern: Subject,
+    pub queue_groups: Vec<String>,
     pub sender: mpsc::Sender<DurableServerMessage>,
     pub ack_timeout_secs: u32,
     pub max_in_flight: u32,
@@ -272,6 +273,11 @@ impl BrokerEngine {
         delivered
     }
 
+    /// Return the next round-robin index for a group of `count` members.
+    fn next_round_robin(&self, count: usize) -> usize {
+        self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize % count
+    }
+
     /// Pick one member via round-robin. If the picked member is dead, try the
     /// next one. Returns 0 or 1.
     fn deliver_one_group(
@@ -281,7 +287,10 @@ impl BrokerEngine {
         subject: &Subject,
     ) -> usize {
         let len = members.len();
-        let start = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
+        if len == 0 {
+            return 0;
+        }
+        let start = self.next_round_robin(len);
 
         for i in 0..len {
             if members.is_empty() {
@@ -337,26 +346,50 @@ impl BrokerEngine {
         store: &Arc<dyn MessageStore>,
         envelope: &EventEnvelope,
     ) {
+        use std::collections::HashMap;
+
         let subject = Subject::from_bytes(&envelope.subject).ok();
 
-        for entry in self.durable_consumers.iter() {
-            let consumer = entry.value();
+        // Partition matching consumers into fanout (no groups) and per-group buckets.
+        let mut fanout: Vec<(String, u32, mpsc::Sender<DurableServerMessage>)> = Vec::new();
+        let mut groups: HashMap<String, Vec<(String, u32, mpsc::Sender<DurableServerMessage>)>> =
+            HashMap::new();
 
-            if !self.consumer_matches(consumer, &envelope.subject, subject.as_ref()) {
+        for entry in self.durable_consumers.iter() {
+            let c = entry.value();
+            if !self.consumer_matches(c, &envelope.subject, subject.as_ref()) {
                 continue;
             }
+            let tuple = (
+                c.consumer_name.clone(),
+                c.ack_timeout_secs,
+                c.sender.clone(),
+            );
+            if c.queue_groups.is_empty() {
+                fanout.push(tuple);
+            } else {
+                for group in &c.queue_groups {
+                    groups.entry(group.clone()).or_default().push(tuple.clone());
+                }
+            }
+        }
 
-            let now_ms = now_ms();
-            let deadline = now_ms + u64::from(consumer.ack_timeout_secs) * 1000;
+        // Select one consumer per queue group via shared round-robin.
+        for members in groups.into_values() {
+            let idx = self.next_round_robin(members.len());
+            if let Some(picked) = members.into_iter().nth(idx) {
+                fanout.push(picked);
+            }
+        }
 
-            trace!(consumer = %consumer.consumer_name, id = %envelope.id, "dispatching to durable consumer");
+        // Dispatch to all selected consumers.
+        for (name, ack_timeout_secs, sender) in &fanout {
+            let deadline = now_ms() + u64::from(*ack_timeout_secs) * 1000;
 
-            if let Err(e) = store.mark_delivered(&envelope.id, &consumer.consumer_name, deadline) {
-                warn!(
-                    consumer = consumer.consumer_name,
-                    id = envelope.id,
-                    "failed to mark delivered: {e}"
-                );
+            trace!(consumer = %name, id = %envelope.id, "dispatching to durable consumer");
+
+            if let Err(e) = store.mark_delivered(&envelope.id, name, deadline) {
+                warn!(consumer = %name, id = %envelope.id, "failed to mark delivered: {e}");
                 continue;
             }
 
@@ -366,11 +399,8 @@ impl BrokerEngine {
                 )),
             };
 
-            if consumer.sender.try_send(msg).is_err() {
-                warn!(
-                    consumer = consumer.consumer_name,
-                    "durable consumer channel full or closed"
-                );
+            if sender.try_send(msg).is_err() {
+                warn!(consumer = %name, "durable consumer channel full or closed");
             }
         }
     }
@@ -420,6 +450,7 @@ impl BrokerEngine {
             consumer_name: consumer_name.clone(),
             subject_bytes: subject_bytes.clone(),
             subject_pattern,
+            queue_groups: queue_groups.clone(),
             sender: tx,
             ack_timeout_secs,
             max_in_flight,
@@ -760,5 +791,195 @@ mod tests {
         // broadcast::Sender::receiver_count() should reflect the drop.
         let subs = engine.exact_subscriptions.get(&subject).unwrap();
         assert_eq!(subs.fanout.receiver_count(), 1);
+    }
+
+    // -- Durable queue group tests --
+
+    fn make_durable_engine() -> BrokerEngine {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = Arc::new(hermes_store::RedbMessageStore::open(tmp.path()).unwrap())
+            as Arc<dyn MessageStore>;
+        // Leak tempfile so it lives for the test duration
+        std::mem::forget(tmp);
+        BrokerEngine::with_store(16, store)
+    }
+
+    fn make_durable_envelope(subject: &Subject, id: &str) -> EventEnvelope {
+        EventEnvelope {
+            id: id.into(),
+            subject: subject.to_bytes(),
+            payload: vec![1, 2, 3],
+            headers: Default::default(),
+            timestamp_nanos: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_durable_queue_group_round_robin() {
+        let engine = make_durable_engine();
+        let subject = Subject::new().str("durable").str("qg");
+        let subject_bytes = subject.to_bytes();
+
+        let (_cid1, mut rx1) = engine
+            .subscribe_durable(
+                "c1".into(),
+                subject_bytes.clone(),
+                vec!["workers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+        let (_cid2, mut rx2) = engine
+            .subscribe_durable(
+                "c2".into(),
+                subject_bytes.clone(),
+                vec!["workers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+
+        // Publish 2 messages — each consumer should get exactly 1 (round-robin).
+        engine
+            .publish_durable(&make_durable_envelope(&subject, "msg-1"))
+            .unwrap();
+        engine
+            .publish_durable(&make_durable_envelope(&subject, "msg-2"))
+            .unwrap();
+
+        // Small yield to let channels propagate.
+        tokio::task::yield_now().await;
+
+        let got1 = std::iter::from_fn(|| rx1.try_recv().ok()).count();
+        let got2 = std::iter::from_fn(|| rx2.try_recv().ok()).count();
+
+        assert_eq!(got1 + got2, 2, "total should be 2");
+        assert!(
+            got1 >= 1 && got2 >= 1,
+            "round-robin should distribute: c1={got1}, c2={got2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_durable_no_queue_group_is_fanout() {
+        let engine = make_durable_engine();
+        let subject = Subject::new().str("durable").str("fanout");
+        let subject_bytes = subject.to_bytes();
+
+        let (_cid1, mut rx1) = engine
+            .subscribe_durable("c1".into(), subject_bytes.clone(), vec![], 10, 30)
+            .unwrap();
+        let (_cid2, mut rx2) = engine
+            .subscribe_durable("c2".into(), subject_bytes.clone(), vec![], 10, 30)
+            .unwrap();
+
+        engine
+            .publish_durable(&make_durable_envelope(&subject, "msg-1"))
+            .unwrap();
+
+        tokio::task::yield_now().await;
+
+        let got1 = std::iter::from_fn(|| rx1.try_recv().ok()).count();
+        let got2 = std::iter::from_fn(|| rx2.try_recv().ok()).count();
+
+        // Fanout: both consumers should get the message.
+        assert_eq!(got1, 1, "c1 should receive 1");
+        assert_eq!(got2, 1, "c2 should receive 1");
+    }
+
+    #[tokio::test]
+    async fn test_durable_mixed_fanout_and_queue_group() {
+        let engine = make_durable_engine();
+        let subject = Subject::new().str("durable").str("mixed");
+        let subject_bytes = subject.to_bytes();
+
+        // Observer (no group) — always gets the message.
+        let (_cid1, mut rx_observer) = engine
+            .subscribe_durable("observer".into(), subject_bytes.clone(), vec![], 10, 30)
+            .unwrap();
+
+        // Two workers in same group — only one gets it.
+        let (_cid2, mut rx_w1) = engine
+            .subscribe_durable(
+                "w1".into(),
+                subject_bytes.clone(),
+                vec!["workers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+        let (_cid3, mut rx_w2) = engine
+            .subscribe_durable(
+                "w2".into(),
+                subject_bytes.clone(),
+                vec!["workers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+
+        engine
+            .publish_durable(&make_durable_envelope(&subject, "msg-1"))
+            .unwrap();
+
+        tokio::task::yield_now().await;
+
+        let obs = std::iter::from_fn(|| rx_observer.try_recv().ok()).count();
+        let w1 = std::iter::from_fn(|| rx_w1.try_recv().ok()).count();
+        let w2 = std::iter::from_fn(|| rx_w2.try_recv().ok()).count();
+
+        assert_eq!(obs, 1, "observer should always receive");
+        assert_eq!(w1 + w2, 1, "exactly one worker should receive");
+    }
+
+    #[tokio::test]
+    async fn test_durable_multiple_queue_groups() {
+        let engine = make_durable_engine();
+        let subject = Subject::new().str("durable").str("multi");
+        let subject_bytes = subject.to_bytes();
+
+        // c1 in "workers", c2 in "workers", c3 in "loggers"
+        let (_cid1, mut rx1) = engine
+            .subscribe_durable(
+                "c1".into(),
+                subject_bytes.clone(),
+                vec!["workers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+        let (_cid2, mut rx2) = engine
+            .subscribe_durable(
+                "c2".into(),
+                subject_bytes.clone(),
+                vec!["workers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+        let (_cid3, mut rx3) = engine
+            .subscribe_durable(
+                "c3".into(),
+                subject_bytes.clone(),
+                vec!["loggers".into()],
+                10,
+                30,
+            )
+            .unwrap();
+
+        engine
+            .publish_durable(&make_durable_envelope(&subject, "msg-1"))
+            .unwrap();
+
+        tokio::task::yield_now().await;
+
+        let got1 = std::iter::from_fn(|| rx1.try_recv().ok()).count();
+        let got2 = std::iter::from_fn(|| rx2.try_recv().ok()).count();
+        let got3 = std::iter::from_fn(|| rx3.try_recv().ok()).count();
+
+        // "loggers" group has only c3 — must receive.
+        assert_eq!(got3, 1, "c3 (loggers) should receive");
+        // "workers" group: exactly one of c1/c2.
+        assert_eq!(got1 + got2, 1, "exactly one worker should receive");
     }
 }

@@ -1,10 +1,16 @@
-//! Interactive TUI for the hermes.
+//! Interactive TUI for the hermes broker.
 //!
 //! Starts an embedded broker (fire-and-forget + durable) and gives you a
 //! full-screen terminal UI to publish, subscribe, ack, nack, etc.
 //!
-//! Run:
+//! Run with embedded broker:
 //!   cargo run -p hermes-integration-tests --example repl
+//!
+//! Connect to an external broker:
+//!   cargo run -p hermes-integration-tests --example repl -- --connect http://127.0.0.1:4222
+//!
+//! Embedded broker without durable mode:
+//!   cargo run -p hermes-integration-tests --example repl -- --no-store
 //!
 //! Press F1 for help inside the TUI.
 
@@ -15,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -24,13 +31,33 @@ use futures::StreamExt;
 use hermes_client::HermesClient;
 use hermes_core::{Event as BrokerEvent, Subject, event_group};
 use ratatui::Terminal;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "hermes-repl", about = "Interactive TUI for the hermes broker")]
+struct Cli {
+    /// Connect to an external broker instead of starting an embedded one
+    #[arg(short, long, value_name = "URL")]
+    connect: Option<String>,
+
+    /// Path to the redb store file for the embedded broker (default: temp file)
+    #[arg(long, value_name = "PATH")]
+    store_path: Option<String>,
+
+    /// Disable durable mode for the embedded broker (fire-and-forget only)
+    #[arg(long)]
+    no_store: bool,
+}
 
 // ---------------------------------------------------------------------------
 // Event types (for typed shortcuts)
@@ -85,23 +112,37 @@ struct App {
     cursor_pos: usize,
     messages: Vec<LogEntry>,
     subscriptions: HashMap<usize, String>,
+    sub_handles: HashMap<usize, tokio::task::JoinHandle<()>>,
     scroll_offset: usize,
-    show_help: bool,
     should_quit: bool,
     sub_counter: Arc<AtomicUsize>,
+    broker_uri: String,
+    embedded: bool,
+    durable_enabled: bool,
+    pending_acks: HashMap<String, mpsc::Sender<hermes_proto::DurableClientMessage>>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    saved_input: String,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(broker_uri: String, embedded: bool, durable_enabled: bool) -> Self {
         Self {
             input: String::new(),
             cursor_pos: 0,
             messages: Vec::new(),
             subscriptions: HashMap::new(),
+            sub_handles: HashMap::new(),
             scroll_offset: 0,
-            show_help: false,
             should_quit: false,
             sub_counter: Arc::new(AtomicUsize::new(0)),
+            broker_uri,
+            embedded,
+            durable_enabled,
+            pending_acks: HashMap::new(),
+            history: Vec::new(),
+            history_index: None,
+            saved_input: String::new(),
         }
     }
 
@@ -119,6 +160,20 @@ impl App {
 
     fn next_sub_id(&self) -> usize {
         self.sub_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Convert char-based cursor_pos to byte offset in input string.
+    fn cursor_byte_pos(&self) -> usize {
+        self.input
+            .char_indices()
+            .nth(self.cursor_pos)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
+    }
+
+    /// Number of chars in input.
+    fn input_char_count(&self) -> usize {
+        self.input.chars().count()
     }
 }
 
@@ -138,6 +193,9 @@ enum AppEvent {
         payload: String,
         msg_id: String,
         attempt: u32,
+        auto_ack: bool,
+        /// For manual mode: sender to ack/nack this message's stream
+        ack_sender: Option<mpsc::Sender<hermes_proto::DurableClientMessage>>,
     },
     SubscriptionEnded(usize),
     Error {
@@ -150,16 +208,26 @@ enum AppEvent {
 // Broker setup
 // ---------------------------------------------------------------------------
 
-async fn start_broker() -> SocketAddr {
+async fn start_broker(cli: &Cli) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mut config = hermes_server::config::ServerConfig::default();
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    config.store_path = Some(tmp.path().to_path_buf());
+
+    if cli.no_store {
+        config.store_path = None;
+    } else if let Some(ref path) = cli.store_path {
+        config.store_path = Some(std::path::PathBuf::from(path));
+    } else {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        config.store_path = Some(tmp.path().to_path_buf());
+        // Keep the temp file alive by leaking it — it's cleaned up on process exit
+        std::mem::forget(tmp);
+    }
+
     config.redelivery_interval_secs = 2;
     config.default_ack_timeout_secs = 10;
+
     tokio::spawn(async move {
-        let _tmp = tmp;
         hermes_server::run_with_config(listener, config)
             .await
             .unwrap();
@@ -198,7 +266,7 @@ async fn execute_command(
     let args = &parts[1..];
 
     match cmd {
-        "help" | "?" => app.show_help = !app.show_help,
+        "help" | "?" => cmd_help(app),
         "sub" => cmd_sub(client, app, args, event_tx).await,
         "pub" => cmd_pub(client, app, args).await,
         "chat" => cmd_chat(client, app, args).await,
@@ -207,7 +275,14 @@ async fn execute_command(
         "task" => cmd_task(client, app, args).await,
         "batch" => cmd_batch(client, app, args).await,
         "dpub" => cmd_dpub(client, app, args).await,
-        "dsub" => cmd_dsub(client, app, args, event_tx).await,
+        "dsub" => cmd_dsub(client, app, args, event_tx, true).await,
+        "dsub-manual" => cmd_dsub(client, app, args, event_tx, false).await,
+        "ack" => cmd_ack(app, args).await,
+        "nack" => cmd_nack(app, args).await,
+        "unsub" => cmd_unsub(app, args),
+        "subs" => cmd_subs(app),
+        "flood" => cmd_flood(client, app, args).await,
+        "info" => cmd_info(app),
         "clear" => {
             app.messages.clear();
             app.scroll_offset = 0;
@@ -250,7 +325,7 @@ async fn cmd_sub(
     let c = client.clone();
     let tx = event_tx.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let groups_ref: Vec<&str> = groups_owned.iter().map(|s| s.as_str()).collect();
         let mut stream = match c.subscribe_raw(&subject, &groups_ref).await {
             Ok(s) => s,
@@ -293,6 +368,7 @@ async fn cmd_sub(
         }
         let _ = tx.send(AppEvent::SubscriptionEnded(id)).await;
     });
+    app.sub_handles.insert(id, handle);
 }
 
 async fn cmd_pub(client: &HermesClient, app: &mut App, args: &[&str]) {
@@ -442,12 +518,38 @@ async fn cmd_dpub(client: &HermesClient, app: &mut App, args: &[&str]) {
     let payload_str = args[1..].join(" ");
     let payload = payload_str.as_bytes().to_vec();
 
-    match client.publish_raw(&subject, payload).await {
-        Ok(()) => app.log(
-            LogKind::Published,
-            format!("[durable] [{dot_subject}] {payload_str}"),
-        ),
-        Err(e) => app.log(LogKind::Error, format!("dpub failed: {e}")),
+    // Use the durable publish gRPC call (not fire-and-forget publish_raw)
+    use hermes_proto::EventEnvelope;
+    use hermes_proto::broker_client::BrokerClient;
+    use tokio_stream::once;
+
+    let envelope = EventEnvelope {
+        id: uuid::Uuid::now_v7().to_string(),
+        subject: subject.to_bytes(),
+        payload,
+        headers: HashMap::new(),
+        timestamp_nanos: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64,
+    };
+
+    let uri = client.uri().to_string();
+    match BrokerClient::connect(uri).await {
+        Ok(mut grpc) => match grpc.publish_durable(once(envelope)).await {
+            Ok(resp) => {
+                let ack = resp.into_inner();
+                app.log(
+                    LogKind::Published,
+                    format!(
+                        "[durable] [{dot_subject}] {payload_str} (accepted={})",
+                        ack.accepted
+                    ),
+                );
+            }
+            Err(e) => app.log(LogKind::Error, format!("dpub failed: {e}")),
+        },
+        Err(e) => app.log(LogKind::Error, format!("dpub connect failed: {e}")),
     }
 }
 
@@ -456,11 +558,13 @@ async fn cmd_dsub(
     app: &mut App,
     args: &[&str],
     event_tx: &mpsc::Sender<AppEvent>,
+    auto_ack: bool,
 ) {
     if args.len() < 2 {
+        let cmd_name = if auto_ack { "dsub" } else { "dsub-manual" };
         app.log(
             LogKind::Error,
-            "Usage: dsub <consumer> <subject> [groups]".into(),
+            format!("Usage: {cmd_name} <consumer> <subject> [groups]"),
         );
         return;
     }
@@ -476,11 +580,12 @@ async fn cmd_dsub(
     use tokio_stream::wrappers::ReceiverStream;
 
     let id = app.next_sub_id();
-    let label = format!("durable:{consumer_name} on {dot_subject}");
+    let mode = if auto_ack { "auto-ack" } else { "manual" };
+    let label = format!("durable:{consumer_name} on {dot_subject} ({mode})");
     app.subscriptions.insert(id, label.clone());
     app.log(
         LogKind::System,
-        format!("dsub#{id} '{consumer_name}' listening (auto-ack)"),
+        format!("dsub#{id} '{consumer_name}' listening ({mode})"),
     );
 
     let uri = client.uri().to_string();
@@ -489,7 +594,7 @@ async fn cmd_dsub(
     let subject_bytes = subject.to_bytes();
     let name = consumer_name.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let mut grpc = match BrokerClient::connect(uri).await {
             Ok(c) => c,
             Err(e) => {
@@ -558,6 +663,8 @@ async fn cmd_dsub(
                 .unwrap_or_else(|_| format!("<{} bytes>", envelope.payload.len()));
             let msg_id = envelope.id.clone();
 
+            let ack_sender = if auto_ack { None } else { Some(msg_tx.clone()) };
+
             let _ = tx
                 .send(AppEvent::DurableReceived {
                     sub_id: id,
@@ -565,19 +672,239 @@ async fn cmd_dsub(
                     payload: payload_str,
                     msg_id: msg_id.clone(),
                     attempt,
+                    auto_ack,
+                    ack_sender,
                 })
                 .await;
 
-            // Auto-ack
-            use hermes_proto::Ack;
-            let _ = msg_tx
-                .send(DurableClientMessage {
-                    msg: Some(ClientMsg::Ack(Ack { message_id: msg_id })),
-                })
-                .await;
+            if auto_ack {
+                use hermes_proto::Ack;
+                let _ = msg_tx
+                    .send(DurableClientMessage {
+                        msg: Some(ClientMsg::Ack(Ack { message_id: msg_id })),
+                    })
+                    .await;
+            }
         }
         let _ = tx.send(AppEvent::SubscriptionEnded(id)).await;
     });
+    app.sub_handles.insert(id, handle);
+}
+
+async fn cmd_ack(app: &mut App, args: &[&str]) {
+    if args.is_empty() {
+        app.log(LogKind::Error, "Usage: ack <msg_id>".into());
+        return;
+    }
+    let msg_id = args[0];
+    // Allow prefix matching for short IDs
+    let full_id = find_pending_id(&app.pending_acks, msg_id);
+    match full_id {
+        Some(id) => {
+            if let Some(tx) = app.pending_acks.remove(&id) {
+                use hermes_proto::{Ack, DurableClientMessage, durable_client_message::Msg};
+                let _ = tx
+                    .send(DurableClientMessage {
+                        msg: Some(Msg::Ack(Ack {
+                            message_id: id.clone(),
+                        })),
+                    })
+                    .await;
+                app.log(LogKind::System, format!("acked {}", &id[..8.min(id.len())]));
+            }
+        }
+        None => app.log(
+            LogKind::Error,
+            format!("no pending message matching '{msg_id}'"),
+        ),
+    }
+}
+
+async fn cmd_nack(app: &mut App, args: &[&str]) {
+    if args.is_empty() {
+        app.log(LogKind::Error, "Usage: nack <msg_id> [requeue=true]".into());
+        return;
+    }
+    let msg_id = args[0];
+    let requeue = args.get(1).map(|s| *s != "false").unwrap_or(true);
+
+    let full_id = find_pending_id(&app.pending_acks, msg_id);
+    match full_id {
+        Some(id) => {
+            if let Some(tx) = app.pending_acks.remove(&id) {
+                use hermes_proto::{DurableClientMessage, Nack, durable_client_message::Msg};
+                let _ = tx
+                    .send(DurableClientMessage {
+                        msg: Some(Msg::Nack(Nack {
+                            message_id: id.clone(),
+                            requeue,
+                        })),
+                    })
+                    .await;
+                let action = if requeue { "nacked+requeue" } else { "nacked" };
+                app.log(
+                    LogKind::System,
+                    format!("{action} {}", &id[..8.min(id.len())]),
+                );
+            }
+        }
+        None => app.log(
+            LogKind::Error,
+            format!("no pending message matching '{msg_id}'"),
+        ),
+    }
+}
+
+fn find_pending_id(
+    pending: &HashMap<String, mpsc::Sender<hermes_proto::DurableClientMessage>>,
+    prefix: &str,
+) -> Option<String> {
+    // Exact match first
+    if pending.contains_key(prefix) {
+        return Some(prefix.to_string());
+    }
+    // Prefix match
+    let matches: Vec<&String> = pending.keys().filter(|k| k.starts_with(prefix)).collect();
+    if matches.len() == 1 {
+        Some(matches[0].clone())
+    } else {
+        None
+    }
+}
+
+fn cmd_unsub(app: &mut App, args: &[&str]) {
+    if args.is_empty() {
+        app.log(LogKind::Error, "Usage: unsub <id>".into());
+        return;
+    }
+    let id: usize = match args[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            app.log(LogKind::Error, "id must be a number".into());
+            return;
+        }
+    };
+    if let Some(handle) = app.sub_handles.remove(&id) {
+        handle.abort();
+        app.subscriptions.remove(&id);
+        app.log(LogKind::System, format!("sub#{id} cancelled"));
+    } else {
+        app.log(LogKind::Error, format!("no subscription #{id}"));
+    }
+}
+
+fn cmd_subs(app: &mut App) {
+    if app.subscriptions.is_empty() {
+        app.log(LogKind::System, "no active subscriptions".into());
+        return;
+    }
+    let mut entries: Vec<_> = app
+        .subscriptions
+        .iter()
+        .map(|(id, desc)| (*id, desc.clone()))
+        .collect();
+    entries.sort_by_key(|(id, _)| *id);
+    for (id, desc) in entries {
+        app.log(LogKind::System, format!("  #{id} {desc}"));
+    }
+}
+
+async fn cmd_flood(client: &HermesClient, app: &mut App, args: &[&str]) {
+    if args.len() < 2 {
+        app.log(
+            LogKind::Error,
+            "Usage: flood <subject> <count> [payload_size]".into(),
+        );
+        return;
+    }
+    let dot_subject = args[0];
+    let subject = Subject::from(dot_subject);
+    let count: usize = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            app.log(LogKind::Error, "count must be a number".into());
+            return;
+        }
+    };
+    let payload_size: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
+    let payload = vec![b'x'; payload_size];
+
+    let start = std::time::Instant::now();
+    let mut errors = 0usize;
+    for _ in 0..count {
+        if client.publish_raw(&subject, payload.clone()).await.is_err() {
+            errors += 1;
+        }
+    }
+    let elapsed = start.elapsed();
+    let rate = if elapsed.as_secs_f64() > 0.0 {
+        count as f64 / elapsed.as_secs_f64()
+    } else {
+        count as f64
+    };
+
+    app.log(
+        LogKind::Published,
+        format!(
+            "flood [{dot_subject}] {count} msgs ({payload_size}B each) in {:.2?} ({:.0} msg/s, {errors} errors)",
+            elapsed, rate
+        ),
+    );
+}
+
+fn cmd_help(app: &mut App) {
+    let lines = [
+        "--- PUBLISH ---",
+        "  pub <subject> <data>        publish raw payload",
+        "  dpub <subject> <data>       durable publish (persisted)",
+        "  chat <user> <text>          typed ChatMessage",
+        "  order <id> <total>          typed OrderPlaced",
+        "  ship <id> <carrier>         typed OrderShipped",
+        "  task <id> <payload>         typed Task",
+        "  batch <n>                   batch n ChatMessages",
+        "  flood <subj> <n> [size]     stress-test: n raw msgs",
+        "--- SUBSCRIBE ---",
+        "  sub <subject> [grps]        subscribe (fanout/QG)",
+        "  dsub <cons> <subj> [grps]   durable sub (auto-ack)",
+        "  dsub-manual <c> <s> [grps]  durable sub (manual ack)",
+        "  unsub <id>                  cancel subscription by ID",
+        "  subs                        list active subscriptions",
+        "--- DURABLE ACK/NACK ---",
+        "  ack <msg_id>                ack a pending message",
+        "  nack <msg_id> [requeue]     nack (default requeue=true)",
+        "--- OTHER ---",
+        "  info                        broker connection info",
+        "  clear                       clear message log",
+        "  quit / exit / q             quit",
+        "--- SUBJECTS ---",
+        "  Dot-notation: chat.room1, orders.*, logs.>",
+        "  * = one segment, > = rest (like NATS)",
+        "  Groups: sub orders.* workers,loggers",
+    ];
+    for line in lines {
+        app.log(LogKind::System, line.to_string());
+    }
+}
+
+fn cmd_info(app: &mut App) {
+    let mode = if app.embedded { "embedded" } else { "external" };
+    let store = if app.durable_enabled {
+        "durable enabled"
+    } else {
+        "fire-and-forget only"
+    };
+    app.log(
+        LogKind::System,
+        format!("broker: {} ({mode}, {store})", app.broker_uri),
+    );
+    app.log(
+        LogKind::System,
+        format!(
+            "subscriptions: {}, pending acks: {}",
+            app.subscriptions.len(),
+            app.pending_acks.len()
+        ),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -597,41 +924,40 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
 
     // Body: sidebar + messages
     let horizontal = Layout::horizontal([
-        Constraint::Length(26), // sidebar
+        Constraint::Length(30), // sidebar (wider for new labels)
         Constraint::Min(30),    // messages
     ]);
     let [sidebar_area, messages_area] = horizontal.areas(body_area);
 
     // -- Sidebar: subscriptions --
-    let sub_items: Vec<ListItem> = {
-        let mut entries: Vec<_> = app.subscriptions.iter().collect();
-        entries.sort_by_key(|(id, _)| *id);
-        entries
-            .iter()
-            .map(|(id, desc)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("#{id} "), Style::default().fg(Color::Yellow)),
-                    Span::raw(desc.as_str()),
-                ]))
-            })
-            .collect()
-    };
-
     let sub_block = Block::default()
         .borders(Borders::ALL)
         .title(" Subscriptions ")
         .border_style(Style::default().fg(Color::Cyan));
 
-    let sub_list = if sub_items.is_empty() {
-        List::new(vec![ListItem::new(Span::styled(
+    let sub_lines: Vec<Line> = if app.subscriptions.is_empty() {
+        vec![Line::from(Span::styled(
             "  (none)",
             Style::default().fg(Color::DarkGray),
-        ))])
-        .block(sub_block)
+        ))]
     } else {
-        List::new(sub_items).block(sub_block)
+        let mut entries: Vec<_> = app.subscriptions.iter().collect();
+        entries.sort_by_key(|(id, _)| *id);
+        entries
+            .iter()
+            .map(|(id, desc)| {
+                Line::from(vec![
+                    Span::styled(format!("#{id} "), Style::default().fg(Color::Yellow)),
+                    Span::raw(desc.as_str()),
+                ])
+            })
+            .collect()
     };
-    frame.render_widget(sub_list, sidebar_area);
+
+    let sub_widget = Paragraph::new(sub_lines)
+        .block(sub_block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(sub_widget, sidebar_area);
 
     // -- Messages log --
     let msg_block = Block::default()
@@ -668,7 +994,9 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         })
         .collect();
 
-    let msg_paragraph = Paragraph::new(msg_lines).block(msg_block);
+    let msg_paragraph = Paragraph::new(msg_lines)
+        .block(msg_block)
+        .wrap(Wrap { trim: false });
     frame.render_widget(msg_paragraph, messages_area);
 
     // -- Input line --
@@ -695,14 +1023,22 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     frame.set_cursor_position((cursor_x, cursor_y));
 
     // -- Status bar --
+    let mode_label = if app.embedded { "embedded" } else { "external" };
     let status = Line::from(vec![
         Span::styled(
-            " F1",
+            " help",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" Help  "),
+        Span::raw(" Commands  "),
+        Span::styled(
+            "Up/Down",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" History  "),
         Span::styled(
             "Ctrl-C",
             Style::default()
@@ -719,132 +1055,15 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         Span::raw(" Scroll  "),
         Span::styled(
             format!(
-                " {} subs  {} msgs",
+                " {} subs  {} msgs  {} pending  {mode_label}",
                 app.subscriptions.len(),
-                app.messages.len()
+                app.messages.len(),
+                app.pending_acks.len(),
             ),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
     frame.render_widget(Paragraph::new(status), status_area);
-
-    // -- Help overlay --
-    if app.show_help {
-        draw_help_popup(frame, outer);
-    }
-}
-
-fn draw_help_popup(frame: &mut ratatui::Frame, area: Rect) {
-    let popup_width = 60.min(area.width.saturating_sub(4));
-    let popup_height = 22.min(area.height.saturating_sub(4));
-    let x = (area.width.saturating_sub(popup_width)) / 2;
-    let y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    let clear = Paragraph::new("").block(Block::default().style(Style::default().bg(Color::Black)));
-    frame.render_widget(clear, popup_area);
-
-    let help_lines = vec![
-        Line::from(Span::styled(
-            "  COMMANDS",
-            Style::default().fg(Color::Yellow).bold(),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(
-                "  sub <subject> [grps]   ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("subscribe (fanout/QG)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  pub <subject> <data>   ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("publish raw payload"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  chat <user> <text>     ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("typed ChatMessage"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  order <id> <total>     ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("typed OrderPlaced"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  ship <id> <carrier>    ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("typed OrderShipped"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  task <id> <payload>    ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("typed Task"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  batch <n>              ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("batch n ChatMessages"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  dpub <subj> <data>     ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("durable publish"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  dsub <cons> <subj>     ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("durable sub (auto-ack)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  clear                  ",
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("clear message log"),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  SUBJECTS",
-            Style::default().fg(Color::Yellow).bold(),
-        )),
-        Line::raw("  Dot-notation: chat.room1, orders.*, logs.>"),
-        Line::raw("  * = one segment, > = rest (like NATS)"),
-        Line::raw("  Groups: sub orders.* workers,loggers"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Press F1 or Esc to close",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    let help = Paragraph::new(help_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Help ")
-                .border_style(Style::default().fg(Color::Yellow)),
-        )
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(help, popup_area);
 }
 
 // ---------------------------------------------------------------------------
@@ -853,21 +1072,36 @@ fn draw_help_popup(frame: &mut ratatui::Frame, area: Rect) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = start_broker().await;
+    let cli = Cli::parse();
+
+    let (broker_uri, embedded, durable_enabled) = if let Some(ref url) = cli.connect {
+        (url.clone(), false, true) // assume external broker may support durable
+    } else {
+        let durable = !cli.no_store;
+        let addr = start_broker(&cli).await;
+        (format!("http://{addr}"), true, durable)
+    };
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))?;
 
-    let client = HermesClient::connect(format!("http://{addr}")).await?;
-    let mut app = App::new();
+    let client = HermesClient::connect(&broker_uri).await?;
+    let mut app = App::new(broker_uri.clone(), embedded, durable_enabled);
+
+    let mode_str = if embedded { "embedded" } else { "external" };
+    let store_str = if durable_enabled {
+        "fire-and-forget + durable"
+    } else {
+        "fire-and-forget only"
+    };
     app.log(
         LogKind::System,
-        format!("Broker started on {addr} (fire-and-forget + durable)"),
+        format!("Connected to {broker_uri} ({mode_str}, {store_str})"),
     );
     app.log(
         LogKind::System,
-        "Press F1 for help. Type commands below.".into(),
+        "Type 'help' for commands. Up/Down for history.".into(),
     );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(256);
@@ -893,23 +1127,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(ev) = key_event else { break };
                 match ev {
                     Event::Key(KeyEvent { code, modifiers, .. }) => {
-                        if app.show_help {
-                            match code {
-                                KeyCode::F(1) | KeyCode::Esc => app.show_help = false,
-                                _ => {}
-                            }
-                            continue;
-                        }
-
                         match (code, modifiers) {
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
-                            (KeyCode::F(1), _) => app.show_help = true,
 
                             (KeyCode::Enter, _) => {
                                 let input = app.input.clone();
                                 app.input.clear();
                                 app.cursor_pos = 0;
+                                app.history_index = None;
                                 if !input.trim().is_empty() {
+                                    app.history.push(input.trim().to_string());
                                     execute_command(input.trim(), &client, &mut app, &event_tx).await;
                                     if app.should_quit {
                                         break;
@@ -917,31 +1144,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
+                            (KeyCode::Up, _) => {
+                                if !app.history.is_empty() {
+                                    let idx = match app.history_index {
+                                        None => {
+                                            app.saved_input = app.input.clone();
+                                            app.history.len() - 1
+                                        }
+                                        Some(i) => i.saturating_sub(1),
+                                    };
+                                    app.history_index = Some(idx);
+                                    app.input = app.history[idx].clone();
+                                    app.cursor_pos = app.input_char_count();
+                                }
+                            }
+                            (KeyCode::Down, _) => {
+                                if let Some(idx) = app.history_index {
+                                    if idx + 1 < app.history.len() {
+                                        let new_idx = idx + 1;
+                                        app.history_index = Some(new_idx);
+                                        app.input = app.history[new_idx].clone();
+                                        app.cursor_pos = app.input_char_count();
+                                    } else {
+                                        app.history_index = None;
+                                        app.input = app.saved_input.clone();
+                                        app.cursor_pos = app.input_char_count();
+                                    }
+                                }
+                            }
+
                             (KeyCode::Char(c), _) => {
-                                app.input.insert(app.cursor_pos, c);
+                                let byte_pos = app.cursor_byte_pos();
+                                app.input.insert(byte_pos, c);
                                 app.cursor_pos += 1;
                             }
                             (KeyCode::Backspace, _) => {
                                 if app.cursor_pos > 0 {
                                     app.cursor_pos -= 1;
-                                    app.input.remove(app.cursor_pos);
+                                    let byte_pos = app.cursor_byte_pos();
+                                    app.input.remove(byte_pos);
                                 }
                             }
                             (KeyCode::Delete, _) => {
-                                if app.cursor_pos < app.input.len() {
-                                    app.input.remove(app.cursor_pos);
+                                if app.cursor_pos < app.input_char_count() {
+                                    let byte_pos = app.cursor_byte_pos();
+                                    app.input.remove(byte_pos);
                                 }
                             }
                             (KeyCode::Left, _) => {
                                 app.cursor_pos = app.cursor_pos.saturating_sub(1);
                             }
                             (KeyCode::Right, _) => {
-                                if app.cursor_pos < app.input.len() {
+                                if app.cursor_pos < app.input_char_count() {
                                     app.cursor_pos += 1;
                                 }
                             }
                             (KeyCode::Home, _) => app.cursor_pos = 0,
-                            (KeyCode::End, _) => app.cursor_pos = app.input.len(),
+                            (KeyCode::End, _) => app.cursor_pos = app.input_char_count(),
 
                             (KeyCode::PageUp, _) => {
                                 app.scroll_offset = app.scroll_offset.saturating_sub(10);
@@ -969,17 +1228,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             format!("sub#{sub_id} [{subject}] {payload}"),
                         );
                     }
-                    AppEvent::DurableReceived { sub_id, subject, payload, msg_id, attempt } => {
-                        app.log(
-                            LogKind::Received,
-                            format!(
-                                "dsub#{sub_id} [{subject}] {payload} (id={}, attempt={attempt}, auto-acked)",
-                                &msg_id[..8.min(msg_id.len())]
-                            ),
-                        );
+                    AppEvent::DurableReceived { sub_id, subject, payload, msg_id, attempt, auto_ack, ack_sender } => {
+                        let short_id = &msg_id[..8.min(msg_id.len())];
+                        if auto_ack {
+                            app.log(
+                                LogKind::Received,
+                                format!(
+                                    "dsub#{sub_id} [{subject}] {payload} (id={short_id}, attempt={attempt}, auto-acked)",
+                                ),
+                            );
+                        } else {
+                            app.log(
+                                LogKind::Received,
+                                format!(
+                                    "dsub#{sub_id} [{subject}] {payload} (id={short_id}, attempt={attempt}, PENDING — use ack/nack {short_id})",
+                                ),
+                            );
+                            if let Some(sender) = ack_sender {
+                                app.pending_acks.insert(msg_id, sender);
+                            }
+                        }
                     }
                     AppEvent::SubscriptionEnded(id) => {
                         app.subscriptions.remove(&id);
+                        app.sub_handles.remove(&id);
                         app.log(LogKind::System, format!("sub#{id} stream ended"));
                     }
                     AppEvent::Error { sub_id, error } => {
