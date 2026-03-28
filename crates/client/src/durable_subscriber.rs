@@ -81,7 +81,7 @@ pub(crate) async fn subscribe_durable<E: Event>(
     outgoing_tx
         .send(DurableClientMessage {
             msg: Some(ClientMsg::Subscribe(DurableSubscribeRequest {
-                subject: subject.to_json(),
+                subject: subject.to_bytes(),
                 consumer_name: consumer_name.to_string(),
                 queue_groups: queue_groups.iter().map(|s| s.to_string()).collect(),
                 max_in_flight,
@@ -97,7 +97,7 @@ pub(crate) async fn subscribe_durable<E: Event>(
         .await?;
     let mut server_stream = response.into_inner();
 
-    debug!(consumer_name, subject = %subject.to_json(), max_in_flight, ack_timeout_secs, "durable subscription stream opened");
+    debug!(consumer_name, subject = %subject, max_in_flight, ack_timeout_secs, "durable subscription stream opened");
 
     // Channel for decoded messages to the caller.
     let (msg_tx, msg_rx) = mpsc::channel(capacity);

@@ -16,7 +16,6 @@ hermes-macros = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
-serde_json = { workspace = true }
 
 [lib]
 name = "hermes_core"

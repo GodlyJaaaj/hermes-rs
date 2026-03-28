@@ -1,7 +1,6 @@
 use std::fmt;
 
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Segment – a single typed piece of a subject (concrete or pattern)
@@ -17,13 +16,7 @@ const RESERVED_CHARS: &[char] = &['.', '*', '>'];
 /// Concrete segments are [`Str`](Segment::Str) and [`Int`](Segment::Int).
 /// Pattern segments are [`Any`](Segment::Any) (`*`, matches one) and
 /// [`Rest`](Segment::Rest) (`>`, matches zero-or-more trailing).
-///
-/// Serialises to a flat JSON value: strings, integers, `"*"`, or `">"`.
-///
-/// ```text
-/// ["job", 42, "*", ">"]
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Segment {
     /// A literal string value.
     Str(String),
@@ -36,63 +29,47 @@ pub enum Segment {
 }
 
 impl Segment {
+    /// Create a string segment.
+    pub fn s(s: impl Into<String>) -> Self {
+        Self::Str(s.into())
+    }
+
+    /// Create an integer segment.
+    pub fn i(v: i64) -> Self {
+        Self::Int(v)
+    }
+
+    /// Create a single-segment wildcard (`*`).
+    pub fn any() -> Self {
+        Self::Any
+    }
+
+    /// Create a trailing wildcard (`>`).
+    pub fn rest() -> Self {
+        Self::Rest
+    }
+
     /// `true` if this segment is a wildcard (`Any` or `Rest`).
     pub fn is_wildcard(&self) -> bool {
         matches!(self, Self::Any | Self::Rest)
     }
 }
 
-// Custom serde: serialize as flat JSON values.
-// "Str" → JSON string, "Int" → JSON number, "Any" → "*", "Rest" → ">"
-
-impl Serialize for Segment {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Str(s) => serializer.serialize_str(s),
-            Self::Int(n) => serializer.serialize_i64(*n),
-            Self::Any => serializer.serialize_str("*"),
-            Self::Rest => serializer.serialize_str(">"),
-        }
+impl From<&str> for Segment {
+    fn from(s: &str) -> Self {
+        Self::Str(s.to_owned())
     }
 }
 
-struct SegmentVisitor;
-
-impl<'de> Visitor<'de> for SegmentVisitor {
-    type Value = Segment;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a string, integer, \"*\", or \">\"")
-    }
-
-    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Segment, E> {
-        Ok(Segment::Int(v))
-    }
-
-    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Segment, E> {
-        Ok(Segment::Int(v as i64))
-    }
-
-    fn visit_str<E: de::Error>(self, v: &str) -> Result<Segment, E> {
-        match v {
-            "*" => Ok(Segment::Any),
-            ">" => Ok(Segment::Rest),
-            _ => Ok(Segment::Str(v.to_owned())),
-        }
-    }
-
-    fn visit_string<E: de::Error>(self, v: String) -> Result<Segment, E> {
-        match v.as_str() {
-            "*" => Ok(Segment::Any),
-            ">" => Ok(Segment::Rest),
-            _ => Ok(Segment::Str(v)),
-        }
+impl From<String> for Segment {
+    fn from(s: String) -> Self {
+        Self::Str(s)
     }
 }
 
-impl<'de> Deserialize<'de> for Segment {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(SegmentVisitor)
+impl From<i64> for Segment {
+    fn from(v: i64) -> Self {
+        Self::Int(v)
     }
 }
 
@@ -114,17 +91,22 @@ impl fmt::Display for Segment {
 /// A structured subject made of typed [`Segment`]s.
 ///
 /// A subject can be **concrete** (no wildcards) or a **pattern** (with `*`
-/// and/or `>`). The wire format is a flat JSON array:
+/// and/or `>`). The wire format is bincode-encoded bytes.
 ///
 /// ```
 /// # use hermes_core::Subject;
 /// // Concrete:
 /// let s = Subject::new().str("job").int(42).str("logs");
-/// assert_eq!(s.to_json(), r#"["job",42,"logs"]"#);
+/// assert_eq!(s.to_string(), "job.42.logs");
 ///
 /// // Pattern:
 /// let p = Subject::new().str("job").any().str("logs");
-/// assert_eq!(p.to_json(), r#"["job","*","logs"]"#);
+/// assert_eq!(p.to_string(), "job.*.logs");
+///
+/// // Roundtrip through bytes:
+/// let bytes = s.to_bytes();
+/// let s2 = Subject::from_bytes(&bytes).unwrap();
+/// assert_eq!(s, s2);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -278,15 +260,17 @@ impl Subject {
         }
     }
 
-    /// Serialise to a JSON array string (wire format).
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(&self.segments).expect("Segment serialisation cannot fail")
+    /// Serialize to bincode bytes (wire format).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .expect("Subject serialization cannot fail")
     }
 
-    /// Deserialise from a JSON array string.
-    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
-        let segments: Vec<Segment> = serde_json::from_str(s)?;
-        Ok(Self { segments })
+    /// Deserialize from bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::DecodeError> {
+        let (val, _) =
+            bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+        Ok(val)
     }
 
     /// Build a [`Subject`] from `module_path!()` and a type name.
@@ -370,11 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn subject_json_roundtrip() {
+    fn subject_bytes_roundtrip() {
         let s = Subject::new().str("job").int(42).str("logs");
-        let json = s.to_json();
-        assert_eq!(json, r#"["job",42,"logs"]"#);
-        let s2 = Subject::from_json(&json).unwrap();
+        let bytes = s.to_bytes();
+        let s2 = Subject::from_bytes(&bytes).unwrap();
         assert_eq!(s, s2);
     }
 
@@ -390,16 +373,8 @@ mod tests {
     fn subject_from_module_path() {
         let s = Subject::from_module_path("app::events", "ChatMessage");
         assert_eq!(s.to_string(), "app.events.ChatMessage");
-        assert_eq!(s.to_json(), r#"["app","events","ChatMessage"]"#);
-    }
-
-    #[test]
-    fn subject_serde_roundtrip() {
-        let s = Subject::new().str("a").int(1).str("b");
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(json, r#"["a",1,"b"]"#);
-        let s2: Subject = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, s2);
+        let roundtripped = Subject::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(s, roundtripped);
     }
 
     // -- Patterns --
@@ -446,20 +421,18 @@ mod tests {
     }
 
     #[test]
-    fn pattern_json_roundtrip() {
+    fn pattern_bytes_roundtrip() {
         let p = Subject::new().str("job").any().rest();
-        let json = p.to_json();
-        assert_eq!(json, r#"["job","*",">"]"#);
-        let p2 = Subject::from_json(&json).unwrap();
+        let bytes = p.to_bytes();
+        let p2 = Subject::from_bytes(&bytes).unwrap();
         assert_eq!(p, p2);
     }
 
     #[test]
-    fn pattern_serde_roundtrip() {
+    fn pattern_mixed_roundtrip() {
         let p = Subject::new().str("a").int(1).any().rest();
-        let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, r#"["a",1,"*",">"]"#);
-        let p2: Subject = serde_json::from_str(&json).unwrap();
+        let bytes = p.to_bytes();
+        let p2 = Subject::from_bytes(&bytes).unwrap();
         assert_eq!(p, p2);
     }
 
@@ -490,4 +463,5 @@ mod tests {
     fn rest_must_be_last() {
         Subject::new().str("a").rest().str("b");
     }
+
 }

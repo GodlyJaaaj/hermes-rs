@@ -17,6 +17,9 @@ redb = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+hermes-core = { workspace = true }
+
 [lib]
 name = "hermes_store"
 

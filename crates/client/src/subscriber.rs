@@ -23,9 +23,8 @@ pub(crate) async fn subscribe_event<E: Event>(
     let mut streams = Vec::with_capacity(subjects.len());
 
     for subject in subjects {
-        let subject_json = subject.to_json();
         let request = SubscribeRequest {
-            subject: subject_json.clone(),
+            subject: subject.to_bytes(),
             queue_groups: qg.clone(),
         };
 
@@ -33,7 +32,7 @@ pub(crate) async fn subscribe_event<E: Event>(
         let response = c.subscribe(request).await?;
         let inner = response.into_inner();
 
-        debug!(subject = %subject_json, "subscribed to subject stream");
+        debug!(subject = %subject, "subscribed to subject stream");
 
         let mapped = inner.map(|result| {
             let envelope = result.map_err(ClientError::Rpc)?;
@@ -59,9 +58,8 @@ pub(crate) async fn subscribe_group<G: EventGroup>(
     let mut streams = Vec::with_capacity(subjects.len());
 
     for subject in subjects {
-        let subject_json = subject.to_json();
         let request = SubscribeRequest {
-            subject: subject_json.clone(),
+            subject: subject.to_bytes(),
             queue_groups: qg.clone(),
         };
 
@@ -69,13 +67,12 @@ pub(crate) async fn subscribe_group<G: EventGroup>(
         let response = c.subscribe(request).await?;
         let inner = response.into_inner();
 
-        debug!(subject = %subject_json, "subscribed to subject stream");
+        debug!(subject = %subject, "subscribed to subject stream");
 
         let mapped = inner.map(move |result| {
             let envelope = result.map_err(ClientError::Rpc)?;
-            let subject = Subject::from_json(&envelope.subject).map_err(|e| {
-                ClientError::Decode(hermes_core::DecodeError::InvalidSubject(e.to_string()))
-            })?;
+            let subject = Subject::from_bytes(&envelope.subject)
+                .map_err(ClientError::Decode)?;
             G::decode_event(&subject, &envelope.payload).map_err(ClientError::Decode)
         });
 

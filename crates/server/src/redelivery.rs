@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hermes_core::Subject;
 use hermes_proto::{DurableServerMessage, Redelivery};
 use hermes_store::MessageStore;
 use tokio::select;
@@ -63,17 +64,21 @@ pub fn spawn_redelivery_loop(
                 for stored in expired {
                     if stored.attempt > max_attempts {
                         // Dead-letter: publish on _dead_letter.{subject} and mark as dead-lettered
-                        let dead_subject = format!("_dead_letter.{}", stored.envelope.subject);
+                        let original_subject = Subject::from_bytes(&stored.envelope.subject)
+                            .unwrap_or_default();
+                        let dead_subject = Subject::new()
+                            .str("_dead_letter")
+                            .segment(hermes_core::Segment::s(original_subject.to_string()));
                         debug!(
                             message_id = stored.envelope.id,
-                            original_subject = stored.envelope.subject,
-                            dead_subject,
+                            original_subject = %original_subject,
+                            dead_subject = %dead_subject,
                             attempt = stored.attempt,
                             "dead-lettering message"
                         );
 
                         let mut dead_envelope = stored.envelope.clone();
-                        dead_envelope.subject = dead_subject;
+                        dead_envelope.subject = dead_subject.to_bytes();
                         engine.publish(&dead_envelope);
 
                         if let Err(e) = store.nack(&stored.envelope.id, consumer_name, false) {

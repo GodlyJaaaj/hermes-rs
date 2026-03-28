@@ -28,7 +28,7 @@ impl BatchPublisher {
     /// Send a typed event through the batch stream.
     pub async fn send<E: Event>(&self, event: &E) -> Result<(), ClientError> {
         let envelope = make_envelope(event)?;
-        trace!(subject = %envelope.subject, id = %envelope.id, "batch: sending event");
+        trace!(id = %envelope.id, "batch: sending event");
         self.sender
             .send(envelope)
             .await
@@ -39,7 +39,7 @@ impl BatchPublisher {
     pub async fn send_raw(&self, subject: &Subject, payload: Vec<u8>) -> Result<(), ClientError> {
         let envelope = EventEnvelope {
             id: Uuid::now_v7().to_string(),
-            subject: subject.to_json(),
+            subject: subject.to_bytes(),
             payload,
             headers: Default::default(),
             timestamp_nanos: now_nanos(),
@@ -72,7 +72,7 @@ pub(crate) fn make_envelope<E: Event>(event: &E) -> Result<EventEnvelope, Client
     let payload = hermes_core::encode(event)?;
     Ok(EventEnvelope {
         id: Uuid::now_v7().to_string(),
-        subject: event.subject().to_json(),
+        subject: event.subject().to_bytes(),
         payload,
         headers: Default::default(),
         timestamp_nanos: i64::try_from(

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use hermes_client::HermesClient;
-use hermes_core::{Event, event_group};
+use hermes_core::{Event, Segment, Subject, event_group};
 use hermes_server::config::ServerConfig;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -31,6 +31,12 @@ enum OrderEvent {
 }
 
 event_group!(UserEvents = [UserCreated, UserDeleted]);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Event)]
+struct JobLog {
+    job_id: String,
+    message: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Event)]
 #[event(subject = "notifications.alert")]
@@ -323,6 +329,135 @@ async fn test_custom_subject_fanout_two_clients() {
 
         assert_eq!(&a, expected, "subscriber A mismatch on alert #{i}");
         assert_eq!(&b, expected, "subscriber B mismatch on alert #{i}");
+    }
+}
+
+// -- publish_on / subscribe_on tests --
+
+#[tokio::test]
+async fn test_publish_on_subscribe_on_with_wildcard() {
+    let addr = start_broker().await;
+    let uri = addr_to_uri(addr);
+
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber = HermesClient::connect(&uri).await.unwrap();
+
+    // Subscribe with wildcard: job.*.logs
+    let pattern = Subject::new().str("job").any().str("logs");
+    let mut stream = subscriber
+        .subscribe_on::<JobLog>(&pattern, &[])
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Publish on concrete subjects — all should match the wildcard
+    for id in ["build", "deploy", "test"] {
+        let log = JobLog {
+            job_id: id.into(),
+            message: format!("{id} completed"),
+        };
+        let subject = Subject::new().str("job").str(id).str("logs");
+        publisher.publish_on(&log, &subject).await.unwrap();
+    }
+
+    // Should receive all 3 messages, typed
+    for expected_id in ["build", "deploy", "test"] {
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("timeout waiting for job {expected_id}"))
+            .expect("stream ended")
+            .expect("decode error");
+        assert_eq!(received.job_id, expected_id);
+        assert_eq!(received.message, format!("{expected_id} completed"));
+    }
+}
+
+#[tokio::test]
+async fn test_publish_on_subscribe_on_no_wildcard() {
+    let addr = start_broker().await;
+    let uri = addr_to_uri(addr);
+
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber = HermesClient::connect(&uri).await.unwrap();
+
+    // Subscribe on a specific concrete subject (no wildcard)
+    let subject = Subject::new().str("job").str("build").str("logs");
+    let mut stream = subscriber
+        .subscribe_on::<JobLog>(&subject, &[])
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Publish on matching subject
+    let log = JobLog {
+        job_id: "build".into(),
+        message: "done".into(),
+    };
+    publisher.publish_on(&log, &subject).await.unwrap();
+
+    // Publish on non-matching subject — should NOT be received
+    let other = Subject::new().str("job").str("deploy").str("logs");
+    publisher
+        .publish_on(
+            &JobLog {
+                job_id: "deploy".into(),
+                message: "done".into(),
+            },
+            &other,
+        )
+        .await
+        .unwrap();
+
+    // Should receive only the matching one
+    let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.job_id, "build");
+
+    // No second message
+    let timeout = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
+    assert!(timeout.is_err(), "should not receive non-matching message");
+}
+
+#[tokio::test]
+async fn test_subject_template_publish_subscribe() {
+    let addr = start_broker().await;
+    let uri = addr_to_uri(addr);
+
+    let publisher = HermesClient::connect(&uri).await.unwrap();
+    let subscriber = HermesClient::connect(&uri).await.unwrap();
+
+    // Subscribe with wildcard: job.*.logs
+    let pattern = Subject::new().str("job").any().str("logs");
+    let mut stream = subscriber
+        .subscribe_on::<JobLog>(&pattern, &[])
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Publish on concrete subjects
+    for id in ["build", "deploy", "test"] {
+        let log = JobLog {
+            job_id: id.into(),
+            message: format!("{id} ok"),
+        };
+        let subject = Subject::new().str("job").str(id).str("logs");
+        publisher.publish_on(&log, &subject).await.unwrap();
+    }
+
+    // All 3 match the pattern
+    for expected_id in ["build", "deploy", "test"] {
+        let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("timeout waiting for {expected_id}"))
+            .expect("stream ended")
+            .expect("decode error");
+        assert_eq!(received.job_id, expected_id);
     }
 }
 

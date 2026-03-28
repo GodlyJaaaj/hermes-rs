@@ -14,26 +14,26 @@ use crate::{DeliveryState, MessageStore, StoredMessage};
 // MESSAGES: message_id (str) -> serialized MessageRecord (bytes)
 // DELIVERIES: "consumer_name:message_id" (str) -> serialized DeliveryRecord (bytes)
 // CONSUMERS: consumer_name (str) -> serialized ConsumerRecord (bytes)
-// SUBJECT_INDEX: "subject:message_id" (str) -> () — for looking up messages by subject
+// SUBJECT_INDEX: [len(4) + subject_bytes + message_id] (bytes) -> ()
 
 const MESSAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("messages");
 const DELIVERIES: TableDefinition<&str, &[u8]> = TableDefinition::new("deliveries");
 const CONSUMERS: TableDefinition<&str, &[u8]> = TableDefinition::new("consumers");
-const SUBJECT_INDEX: TableDefinition<&str, ()> = TableDefinition::new("subject_index");
+const SUBJECT_INDEX: TableDefinition<&[u8], ()> = TableDefinition::new("subject_index_v2");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 /// Current schema version. Bump when adding tables or changing formats.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Record format version byte prepended to serialized records.
-const RECORD_VERSION: u8 = 1;
+const RECORD_VERSION: u8 = 2;
 
 /// A message as stored on disk.
 /// We use a simple hand-rolled serialization to avoid pulling in extra deps.
 #[derive(Debug, Clone)]
 struct MessageRecord {
     id: String,
-    subject: String,
+    subject: Vec<u8>,
     payload: Vec<u8>,
     headers: Vec<(String, String)>,
     timestamp_nanos: i64,
@@ -70,7 +70,7 @@ impl MessageRecord {
         let mut buf = Vec::new();
         buf.push(RECORD_VERSION);
         write_str(&mut buf, &self.id);
-        write_str(&mut buf, &self.subject);
+        write_bytes(&mut buf, &self.subject);
         write_bytes(&mut buf, &self.payload);
         write_u32(&mut buf, self.headers.len() as u32);
         for (k, v) in &self.headers {
@@ -90,33 +90,52 @@ impl MessageRecord {
         let version = data[0];
         pos += 1;
 
-        // Version 0 (legacy): no version byte — re-parse from start.
-        // Version 1: current format with version prefix.
-        if version != RECORD_VERSION {
-            // Attempt legacy parse (version byte is actually start of id length).
-            pos = 0;
+        if version == RECORD_VERSION {
+            // v2: subject is bytes
+            let id = read_str(data, &mut pos)?;
+            let subject = read_bytes(data, &mut pos)?;
+            let payload = read_bytes(data, &mut pos)?;
+            let header_count = read_u32(data, &mut pos)? as usize;
+            let mut headers = Vec::with_capacity(header_count);
+            for _ in 0..header_count {
+                let k = read_str(data, &mut pos)?;
+                let v = read_str(data, &mut pos)?;
+                headers.push((k, v));
+            }
+            let timestamp_nanos = read_i64(data, &mut pos)?;
+            let created_at_ms = read_u64(data, &mut pos)?;
+            Some(Self {
+                id,
+                subject,
+                payload,
+                headers,
+                timestamp_nanos,
+                created_at_ms,
+            })
+        } else {
+            // Legacy v0/v1: subject was a string, re-parse from start
+            pos = if version == 1 { 1 } else { 0 };
+            let id = read_str(data, &mut pos)?;
+            let subject_str = read_str(data, &mut pos)?;
+            let payload = read_bytes(data, &mut pos)?;
+            let header_count = read_u32(data, &mut pos)? as usize;
+            let mut headers = Vec::with_capacity(header_count);
+            for _ in 0..header_count {
+                let k = read_str(data, &mut pos)?;
+                let v = read_str(data, &mut pos)?;
+                headers.push((k, v));
+            }
+            let timestamp_nanos = read_i64(data, &mut pos)?;
+            let created_at_ms = read_u64(data, &mut pos)?;
+            Some(Self {
+                id,
+                subject: subject_str.into_bytes(),
+                payload,
+                headers,
+                timestamp_nanos,
+                created_at_ms,
+            })
         }
-
-        let id = read_str(data, &mut pos)?;
-        let subject = read_str(data, &mut pos)?;
-        let payload = read_bytes(data, &mut pos)?;
-        let header_count = read_u32(data, &mut pos)? as usize;
-        let mut headers = Vec::with_capacity(header_count);
-        for _ in 0..header_count {
-            let k = read_str(data, &mut pos)?;
-            let v = read_str(data, &mut pos)?;
-            headers.push((k, v));
-        }
-        let timestamp_nanos = read_i64(data, &mut pos)?;
-        let created_at_ms = read_u64(data, &mut pos)?;
-        Some(Self {
-            id,
-            subject,
-            payload,
-            headers,
-            timestamp_nanos,
-            created_at_ms,
-        })
     }
 }
 
@@ -142,8 +161,8 @@ impl DeliveryRecord {
             return None;
         }
         let version = data[0];
-        if version == RECORD_VERSION {
-            // Version 1: [version, state, attempt(4), deadline(8)] = 14 bytes
+        if version == RECORD_VERSION || version == 1 {
+            // v1/v2: [version, state, attempt(4), deadline(8)] = 14 bytes
             if data.len() < 14 {
                 return None;
             }
@@ -176,7 +195,7 @@ impl DeliveryRecord {
 
 #[derive(Debug, Clone)]
 struct ConsumerRecord {
-    subject: String,
+    subject: Vec<u8>,
     queue_groups: Vec<String>,
 }
 
@@ -184,7 +203,7 @@ impl ConsumerRecord {
     fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(RECORD_VERSION);
-        write_str(&mut buf, &self.subject);
+        write_bytes(&mut buf, &self.subject);
         write_u32(&mut buf, self.queue_groups.len() as u32);
         for qg in &self.queue_groups {
             write_str(&mut buf, qg);
@@ -196,23 +215,35 @@ impl ConsumerRecord {
         if data.is_empty() {
             return None;
         }
-        let mut pos = 0;
         let version = data[0];
-        if version == RECORD_VERSION {
-            pos = 1; // skip version byte
-        }
-        let subject = read_str(data, &mut pos)?;
 
-        // Legacy format: single optional queue_group (0 = none, 1 = one).
-        // New format: u32 count + N strings.
-        // Distinguish by checking: legacy has a single byte 0 or 1 at pos,
-        // while new format has a u32 count. Since legacy values are 0 or 1,
-        // and we write a u32, we can detect by reading a u32 and checking.
-        // However, legacy byte 0 followed by end-of-data = no groups.
-        // Legacy byte 1 followed by a string = one group.
-        // For backwards compat, detect based on version byte presence.
-        if version != RECORD_VERSION {
-            // Legacy: single optional queue_group
+        if version == RECORD_VERSION {
+            let mut pos = 1;
+            let subject = read_bytes(data, &mut pos)?;
+            let count = read_u32(data, &mut pos)?;
+            let mut queue_groups = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                queue_groups.push(read_str(data, &mut pos)?);
+            }
+            Some(Self {
+                subject,
+                queue_groups,
+            })
+        } else if version == 1 {
+            let mut pos = 1;
+            let subject_str = read_str(data, &mut pos)?;
+            let count = read_u32(data, &mut pos)?;
+            let mut queue_groups = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                queue_groups.push(read_str(data, &mut pos)?);
+            }
+            Some(Self {
+                subject: subject_str.into_bytes(),
+                queue_groups,
+            })
+        } else {
+            let mut pos = 0;
+            let subject_str = read_str(data, &mut pos)?;
             let has_qg = *data.get(pos)?;
             pos += 1;
             let queue_groups = if has_qg == 1 {
@@ -220,21 +251,11 @@ impl ConsumerRecord {
             } else {
                 vec![]
             };
-            return Some(Self {
-                subject,
+            Some(Self {
+                subject: subject_str.into_bytes(),
                 queue_groups,
-            });
+            })
         }
-
-        let count = read_u32(data, &mut pos)?;
-        let mut queue_groups = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            queue_groups.push(read_str(data, &mut pos)?);
-        }
-        Some(Self {
-            subject,
-            queue_groups,
-        })
     }
 }
 
@@ -301,17 +322,29 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Separator for composite keys. Using NUL byte which cannot appear in
-/// UTF-8 JSON strings, preventing ambiguity when subjects or consumer names
-/// contain common delimiters like `:`.
+/// Build a composite key for the subject index: [subject_len(4 LE)][subject][message_id].
+fn subject_index_key(subject: &[u8], message_id: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + subject.len() + message_id.len());
+    key.extend_from_slice(&(subject.len() as u32).to_le_bytes());
+    key.extend_from_slice(subject);
+    key.extend_from_slice(message_id.as_bytes());
+    key
+}
+
+/// Build the prefix for range-scanning the subject index.
+fn subject_index_prefix(subject: &[u8]) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(4 + subject.len());
+    prefix.extend_from_slice(&(subject.len() as u32).to_le_bytes());
+    prefix.extend_from_slice(subject);
+    prefix
+}
+
+/// Separator for composite delivery keys. Using NUL byte which cannot appear in
+/// UTF-8 consumer names or message IDs.
 const KEY_SEP: char = '\0';
 
 fn delivery_key(consumer_name: &str, message_id: &str) -> String {
     format!("{consumer_name}{KEY_SEP}{message_id}")
-}
-
-fn subject_index_key(subject: &str, message_id: &str) -> String {
-    format!("{subject}{KEY_SEP}{message_id}")
 }
 
 // --- RedbMessageStore ---
@@ -386,26 +419,22 @@ impl MessageStore for RedbMessageStore {
 
             let mut idx = txn.open_table(SUBJECT_INDEX)?;
             let key = subject_index_key(&envelope.subject, &envelope.id);
-            idx.insert(key.as_str(), ())?;
+            idx.insert(key.as_slice(), ())?;
         }
         txn.commit()?;
 
-        debug!(
-            id = envelope.id,
-            subject = envelope.subject,
-            "message persisted"
-        );
+        debug!(id = envelope.id, "message persisted");
         Ok(())
     }
 
     fn register_consumer(
         &self,
         consumer_name: &str,
-        subject: &str,
+        subject: &[u8],
         queue_groups: &[String],
     ) -> Result<(), StoreError> {
         let record = ConsumerRecord {
-            subject: subject.to_string(),
+            subject: subject.to_vec(),
             queue_groups: queue_groups.to_vec(),
         };
 
@@ -416,7 +445,7 @@ impl MessageStore for RedbMessageStore {
         }
         txn.commit()?;
 
-        debug!(consumer_name, subject, "consumer registered");
+        debug!(consumer_name, "consumer registered");
         Ok(())
     }
 
@@ -439,13 +468,13 @@ impl MessageStore for RedbMessageStore {
         let deliveries = txn.open_table(DELIVERIES)?;
         let idx = txn.open_table(SUBJECT_INDEX)?;
 
-        let prefix = format!("{}{KEY_SEP}", consumer.subject);
+        let prefix = subject_index_prefix(&consumer.subject);
         let mut result = Vec::new();
 
-        let range = idx.range(prefix.as_str()..)?;
+        let range = idx.range(prefix.as_slice()..)?;
         for entry in range {
             let entry = entry?;
-            let key = entry.0.value();
+            let key: &[u8] = entry.0.value();
 
             // Stop if we've left the prefix range.
             if !key.starts_with(&prefix) {
@@ -456,7 +485,11 @@ impl MessageStore for RedbMessageStore {
                 break;
             }
 
-            let message_id = &key[prefix.len()..];
+            // Extract message_id from the key (after prefix).
+            let message_id = match std::str::from_utf8(&key[prefix.len()..]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             let dk = delivery_key(consumer_name, message_id);
 
             // Skip if already has a delivery record (delivered, acked, or dead-lettered).
@@ -628,8 +661,6 @@ impl MessageStore for RedbMessageStore {
             let mut deliveries = txn.open_table(DELIVERIES)?;
 
             // Phase 1: Single pass over deliveries → build per-message status.
-            // Key format is "consumer_name:message_id".
-            // We track: message_id → (has_deliveries, all_terminal).
             let mut msg_status: std::collections::HashMap<String, bool> =
                 std::collections::HashMap::new();
             let mut del_keys_by_msg: std::collections::HashMap<String, Vec<String>> =
@@ -638,7 +669,6 @@ impl MessageStore for RedbMessageStore {
             for entry in deliveries.range::<&str>(..)? {
                 let entry = entry?;
                 let key = entry.0.value().to_string();
-                // Extract message_id from "consumer_name\0message_id".
                 let message_id = match key.rsplit_once(KEY_SEP) {
                     Some((_, mid)) => mid.to_string(),
                     None => continue,
@@ -676,7 +706,6 @@ impl MessageStore for RedbMessageStore {
                     continue;
                 }
 
-                // GC-eligible: all delivery records are terminal.
                 let all_terminal = msg_status.get(id).copied().unwrap_or(false);
                 if !all_terminal {
                     continue;
@@ -684,7 +713,7 @@ impl MessageStore for RedbMessageStore {
 
                 messages.remove(id.as_str())?;
                 let idx_key = subject_index_key(&record.subject, id);
-                idx.remove(idx_key.as_str())?;
+                idx.remove(idx_key.as_slice())?;
 
                 if let Some(del_keys) = del_keys_by_msg.remove(id) {
                     for dk in del_keys {
@@ -724,28 +753,34 @@ impl MessageStore for RedbMessageStore {
 mod tests {
     use super::*;
 
-    fn test_envelope(id: &str, subject: &str) -> EventEnvelope {
+    fn test_envelope(id: &str, subject: &[u8]) -> EventEnvelope {
         EventEnvelope {
             id: id.to_string(),
-            subject: subject.to_string(),
+            subject: subject.to_vec(),
             payload: vec![1, 2, 3],
             headers: Default::default(),
             timestamp_nanos: 42,
         }
     }
 
+    fn test_subject(s: &str) -> Vec<u8> {
+        use hermes_core::Subject;
+        Subject::from(s).to_bytes()
+    }
+
     #[test]
     fn test_persist_and_fetch_pending() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store
-            .persist(&test_envelope("msg-2", "orders::Created"))
+            .persist(&test_envelope("msg-2", &subject))
             .unwrap();
 
         let pending = store.fetch_pending("worker-1", 10).unwrap();
@@ -757,12 +792,13 @@ mod tests {
     #[test]
     fn test_mark_delivered_excludes_from_pending() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
 
@@ -773,17 +809,17 @@ mod tests {
     #[test]
     fn test_ack() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         store.ack("msg-1", "worker-1").unwrap();
 
-        // Should not show up in pending or expired.
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert!(pending.is_empty());
         let expired = store.fetch_expired("worker-1", u64::MAX, 10).unwrap();
@@ -793,19 +829,19 @@ mod tests {
     #[test]
     fn test_nack_requeue() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert_eq!(pending.len(), 0);
         store.nack("msg-1", "worker-1", true).unwrap();
 
-        // Should show up in pending again.
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert_eq!(pending.len(), 1);
     }
@@ -813,17 +849,17 @@ mod tests {
     #[test]
     fn test_nack_dead_letter() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         store.nack("msg-1", "worker-1", false).unwrap();
 
-        // Should not show up anywhere.
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert!(pending.is_empty());
         let expired = store.fetch_expired("worker-1", u64::MAX, 10).unwrap();
@@ -833,12 +869,13 @@ mod tests {
     #[test]
     fn test_fetch_expired() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store.mark_delivered("msg-1", "worker-1", 1000).unwrap();
 
@@ -849,27 +886,26 @@ mod tests {
         // Now expired.
         let expired = store.fetch_expired("worker-1", 1001, 10).unwrap();
         assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].attempt, 2); // incremented
+        assert_eq!(expired[0].attempt, 2);
     }
 
     #[test]
     fn test_gc_acked() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject))
             .unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         store.ack("msg-1", "worker-1").unwrap();
 
-        // GC with a future threshold should remove it.
         let removed = store.gc_acked(u64::MAX).unwrap();
         assert_eq!(removed, 1);
 
-        // Should be gone.
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert!(pending.is_empty());
     }
@@ -877,12 +913,14 @@ mod tests {
     #[test]
     fn test_list_consumers() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject = test_subject("orders.Created");
+        let subject2 = test_subject("orders.Shipped");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject, &[])
             .unwrap();
         store
-            .register_consumer("worker-2", "orders::Shipped", &[])
+            .register_consumer("worker-2", &subject2, &[])
             .unwrap();
 
         let mut consumers = store.list_consumers().unwrap();
@@ -893,28 +931,31 @@ mod tests {
     #[test]
     fn test_different_subjects_isolated() {
         let store = RedbMessageStore::open_temporary().unwrap();
+        let subject1 = test_subject("orders.Created");
+        let subject2 = test_subject("orders.Shipped");
 
         store
-            .register_consumer("worker-1", "orders::Created", &[])
+            .register_consumer("worker-1", &subject1, &[])
             .unwrap();
         store
-            .persist(&test_envelope("msg-1", "orders::Created"))
+            .persist(&test_envelope("msg-1", &subject1))
             .unwrap();
         store
-            .persist(&test_envelope("msg-2", "orders::Shipped"))
+            .persist(&test_envelope("msg-2", &subject2))
             .unwrap();
 
-        // worker-1 only sees orders::Created.
+        // worker-1 only sees orders.Created.
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].envelope.subject, "orders::Created");
+        assert_eq!(pending[0].envelope.subject, subject1);
     }
 
     #[test]
     fn test_message_record_roundtrip() {
+        let subject = test_subject("test.Subject");
         let envelope = EventEnvelope {
             id: "test-id".into(),
-            subject: "test::Subject".into(),
+            subject: subject.clone(),
             payload: vec![1, 2, 3, 4, 5],
             headers: [("key".to_string(), "value".to_string())].into(),
             timestamp_nanos: 123456789,
@@ -924,7 +965,7 @@ mod tests {
         let deserialized = MessageRecord::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.id, "test-id");
-        assert_eq!(deserialized.subject, "test::Subject");
+        assert_eq!(deserialized.subject, subject);
         assert_eq!(deserialized.payload, vec![1, 2, 3, 4, 5]);
         assert_eq!(deserialized.headers, vec![("key".into(), "value".into())]);
         assert_eq!(deserialized.timestamp_nanos, 123456789);

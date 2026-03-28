@@ -168,8 +168,8 @@ async fn start_broker() -> SocketAddr {
     addr
 }
 
-fn subject_to_json(dot_subject: &str) -> String {
-    Subject::from(dot_subject).to_json()
+fn parse_subject(dot_subject: &str) -> Subject {
+    Subject::from(dot_subject)
 }
 
 fn parse_groups(arg: Option<&str>) -> Vec<&str> {
@@ -234,7 +234,7 @@ async fn cmd_sub(
         return;
     }
     let dot_subject = args[0];
-    let subject_json = subject_to_json(dot_subject);
+    let subject = parse_subject(dot_subject);
     let groups = parse_groups(args.get(1).copied());
     let groups_owned: Vec<String> = groups.iter().map(|s| s.to_string()).collect();
 
@@ -249,11 +249,10 @@ async fn cmd_sub(
 
     let c = client.clone();
     let tx = event_tx.clone();
-    let sj = subject_json.clone();
 
     tokio::spawn(async move {
         let groups_ref: Vec<&str> = groups_owned.iter().map(|s| s.as_str()).collect();
-        let mut stream = match c.subscribe_raw(&sj, &groups_ref).await {
+        let mut stream = match c.subscribe_raw(&subject, &groups_ref).await {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx
@@ -269,9 +268,9 @@ async fn cmd_sub(
         while let Some(result) = stream.next().await {
             match result {
                 Ok(env) => {
-                    let subject_display = Subject::from_json(&env.subject)
+                    let subject_display = Subject::from_bytes(&env.subject)
                         .map(|s| s.to_string())
-                        .unwrap_or_else(|_| env.subject.clone());
+                        .unwrap_or_else(|_| format!("<{} bytes>", env.subject.len()));
                     let payload_str = String::from_utf8(env.payload.clone())
                         .unwrap_or_else(|_| format!("<{} bytes>", env.payload.len()));
                     let _ = tx
@@ -467,7 +466,7 @@ async fn cmd_dsub(
     }
     let consumer_name = args[0].to_string();
     let dot_subject = args[1];
-    let subject_json = subject_to_json(dot_subject);
+    let subject = parse_subject(dot_subject);
     let groups = parse_groups(args.get(2).copied());
 
     use hermes_proto::{
@@ -487,7 +486,7 @@ async fn cmd_dsub(
     let uri = client.uri().to_string();
     let groups_owned: Vec<String> = groups.iter().map(|s| s.to_string()).collect();
     let tx = event_tx.clone();
-    let sj = subject_json.clone();
+    let subject_bytes = subject.to_bytes();
     let name = consumer_name.clone();
 
     tokio::spawn(async move {
@@ -509,7 +508,7 @@ async fn cmd_dsub(
         if msg_tx
             .send(DurableClientMessage {
                 msg: Some(ClientMsg::Subscribe(DurableSubscribeRequest {
-                    subject: sj,
+                    subject: subject_bytes,
                     consumer_name: name.clone(),
                     queue_groups: groups_owned,
                     max_in_flight: 10,
@@ -552,9 +551,9 @@ async fn cmd_dsub(
                 None => continue,
             };
 
-            let subject_display = Subject::from_json(&envelope.subject)
+            let subject_display = Subject::from_bytes(&envelope.subject)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|_| envelope.subject.clone());
+                .unwrap_or_else(|_| format!("<{} bytes>", envelope.subject.len()));
             let payload_str = String::from_utf8(envelope.payload.clone())
                 .unwrap_or_else(|_| format!("<{} bytes>", envelope.payload.len()));
             let msg_id = envelope.id.clone();

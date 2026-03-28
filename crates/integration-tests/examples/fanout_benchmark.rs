@@ -166,17 +166,16 @@ async fn run_one(client: &HermesClient, n: usize, cfg: &Config) -> BenchRow {
 
     let subject_str = format!("bench.fanout.{n}.{}", uuid::Uuid::now_v7());
     let subject = Subject::from(subject_str.as_str());
-    let subject_json = subject.to_json();
 
     // --- Set up subscribers ---
     let mut handles = Vec::with_capacity(clients);
 
     for _ in 0..clients {
         let c = client.clone();
-        let sj = subject_json.clone();
+        let s = subject.clone();
         handles.push(tokio::spawn(async move {
             let mut stream = c
-                .subscribe_raw(&sj, &[])
+                .subscribe_raw(&s, &[])
                 .await
                 .map_err(|e| format!("subscribe_raw error: {e}"))?;
 

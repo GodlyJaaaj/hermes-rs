@@ -22,7 +22,7 @@ pub struct DurableConsumer {
     /// Unique connection ID to prevent stale unsubscribes from removing a newer consumer.
     pub connection_id: u64,
     pub consumer_name: String,
-    pub subject_json: String,
+    pub subject_bytes: Vec<u8>,
     pub subject_pattern: Subject,
     pub sender: mpsc::Sender<DurableServerMessage>,
     pub ack_timeout_secs: u32,
@@ -35,7 +35,6 @@ pub struct DurableConsumer {
 
 /// A wildcard subscription: parsed pattern + pre-partitioned subscribers.
 struct WildcardEntry {
-    pattern: Subject,
     subscribers: SubjectSubscribers,
 }
 
@@ -44,10 +43,10 @@ struct WildcardEntry {
 // ---------------------------------------------------------------------------
 
 pub struct BrokerEngine {
-    /// Exact subscriptions: subject_json -> pre-partitioned subscribers (O(1) lookup).
-    exact_subscriptions: DashMap<String, SubjectSubscribers>,
-    /// Wildcard subscriptions keyed by their JSON pattern string.
-    wildcard_subscriptions: DashMap<String, WildcardEntry>,
+    /// Exact subscriptions: Subject -> pre-partitioned subscribers (O(1) lookup).
+    exact_subscriptions: DashMap<Subject, SubjectSubscribers>,
+    /// Wildcard subscriptions keyed by their pattern Subject.
+    wildcard_subscriptions: DashMap<Subject, WildcardEntry>,
     channel_capacity: usize,
     /// Optional store for durable mode. None = fire-and-forget only.
     store: Option<Arc<dyn MessageStore>>,
@@ -96,34 +95,30 @@ impl BrokerEngine {
     /// - `queue_groups` non-empty → round-robin via `mpsc` per group member.
     pub fn subscribe(
         &self,
-        subject_json: String,
+        subject: Subject,
         queue_groups: Vec<String>,
     ) -> (SubscriptionId, SubscriptionReceiver) {
         let id = Uuid::now_v7();
 
-        let is_wildcard = Subject::from_json(&subject_json)
-            .map(|s| s.is_pattern())
-            .unwrap_or(false);
-
-        let receiver = if is_wildcard {
-            self.subscribe_wildcard(id, &subject_json, &queue_groups)
+        let receiver = if subject.is_pattern() {
+            self.subscribe_wildcard(id, subject.clone(), &queue_groups)
         } else {
-            self.subscribe_exact(id, &subject_json, &queue_groups)
+            self.subscribe_exact(id, subject.clone(), &queue_groups)
         };
 
-        debug!(subject = subject_json, %id, "new subscription");
+        debug!(subject = %subject, %id, "new subscription");
         (id, receiver)
     }
 
     fn subscribe_exact(
         &self,
         id: SubscriptionId,
-        subject_json: &str,
+        subject: Subject,
         queue_groups: &[String],
     ) -> SubscriptionReceiver {
         let mut entry = self
             .exact_subscriptions
-            .entry(subject_json.to_owned())
+            .entry(subject)
             .or_insert_with(|| SubjectSubscribers::new(self.channel_capacity));
 
         if queue_groups.is_empty() {
@@ -139,14 +134,13 @@ impl BrokerEngine {
     fn subscribe_wildcard(
         &self,
         id: SubscriptionId,
-        subject_json: &str,
+        subject: Subject,
         queue_groups: &[String],
     ) -> SubscriptionReceiver {
         let mut entry = self
             .wildcard_subscriptions
-            .entry(subject_json.to_owned())
+            .entry(subject)
             .or_insert_with(|| WildcardEntry {
-                pattern: Subject::from_json(subject_json).unwrap_or_default(),
                 subscribers: SubjectSubscribers::new(self.channel_capacity),
             });
 
@@ -162,25 +156,25 @@ impl BrokerEngine {
 
     /// Unsubscribe by id (queue group members only — fanout subscribers
     /// are automatically removed when their broadcast receiver is dropped).
-    pub fn unsubscribe(&self, subject_json: &str, id: SubscriptionId) {
-        if let Some(mut subs) = self.exact_subscriptions.get_mut(subject_json) {
+    pub fn unsubscribe(&self, subject: &Subject, id: SubscriptionId) {
+        if let Some(mut subs) = self.exact_subscriptions.get_mut(subject) {
             subs.remove_from_groups(id);
             if subs.is_empty() {
                 drop(subs);
-                self.exact_subscriptions.remove(subject_json);
+                self.exact_subscriptions.remove(subject);
             }
-            debug!(subject = subject_json, %id, "unsubscribed");
+            debug!(subject = %subject, %id, "unsubscribed");
             return;
         }
 
-        if let Some(mut we) = self.wildcard_subscriptions.get_mut(subject_json) {
+        if let Some(mut we) = self.wildcard_subscriptions.get_mut(subject) {
             we.subscribers.remove_from_groups(id);
             if we.subscribers.is_empty() {
                 drop(we);
-                self.wildcard_subscriptions.remove(subject_json);
+                self.wildcard_subscriptions.remove(subject);
             }
         }
-        debug!(subject = subject_json, %id, "unsubscribed");
+        debug!(subject = %subject, %id, "unsubscribed");
     }
 
     // -----------------------------------------------------------------------
@@ -190,44 +184,44 @@ impl BrokerEngine {
     /// Publish to fire-and-forget subscribers.
     /// Returns the number of subscribers that received the message.
     pub fn publish(&self, envelope: &EventEnvelope) -> usize {
-        let subject_json = &envelope.subject;
+        let subject = match Subject::from_bytes(&envelope.subject) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
         // Wrap once in Arc — all fanout + queue-group members share this.
         let arc_env = Arc::new(envelope.clone());
 
         let mut delivered: usize = 0;
 
         // 1) Exact match (O(1)).
-        delivered += self.publish_exact(subject_json, &arc_env);
+        delivered += self.publish_exact(&subject, &arc_env);
 
         // 2) Wildcard match (iterate patterns).
-        delivered += self.publish_wildcard(subject_json, &arc_env);
+        delivered += self.publish_wildcard(&subject, &arc_env);
 
-        debug!(subject = subject_json, id = %envelope.id, delivered, "publish completed");
+        debug!(subject = %subject, id = %envelope.id, delivered, "publish completed");
         delivered
     }
 
-    fn publish_exact(&self, subject_json: &str, arc_env: &Arc<EventEnvelope>) -> usize {
-        let Some(mut subs) = self.exact_subscriptions.get_mut(subject_json) else {
-            trace!(subject = subject_json, "no exact subscribers");
+    fn publish_exact(&self, subject: &Subject, arc_env: &Arc<EventEnvelope>) -> usize {
+        let Some(mut subs) = self.exact_subscriptions.get_mut(subject) else {
+            trace!(subject = %subject, "no exact subscribers");
             return 0;
         };
-        self.deliver_to_subscribers(&mut subs, arc_env, subject_json)
+        self.deliver_to_subscribers(&mut subs, arc_env, subject)
     }
 
-    fn publish_wildcard(&self, subject_json: &str, arc_env: &Arc<EventEnvelope>) -> usize {
+    fn publish_wildcard(&self, subject: &Subject, arc_env: &Arc<EventEnvelope>) -> usize {
         if self.wildcard_subscriptions.is_empty() {
             return 0;
         }
-        let Ok(subject) = Subject::from_json(subject_json) else {
-            return 0;
-        };
 
         let mut total = 0;
         for mut entry in self.wildcard_subscriptions.iter_mut() {
-            if entry.value().pattern.matches(&subject) {
-                trace!(subject = subject_json, pattern = %entry.key(), "wildcard match");
+            if entry.key().matches(subject) {
+                trace!(subject = %subject, pattern = %entry.key(), "wildcard match");
                 let we = entry.value_mut();
-                total += self.deliver_to_subscribers(&mut we.subscribers, arc_env, subject_json);
+                total += self.deliver_to_subscribers(&mut we.subscribers, arc_env, subject);
             }
         }
         total
@@ -238,10 +232,10 @@ impl BrokerEngine {
         &self,
         subs: &mut SubjectSubscribers,
         arc_env: &Arc<EventEnvelope>,
-        subject_json: &str,
+        subject: &Subject,
     ) -> usize {
         let fanout_count = self.deliver_fanout(&subs.fanout, arc_env);
-        let group_count = self.deliver_groups(&mut subs.groups, arc_env, subject_json);
+        let group_count = self.deliver_groups(&mut subs.groups, arc_env, subject);
         fanout_count + group_count
     }
 
@@ -265,14 +259,14 @@ impl BrokerEngine {
         &self,
         groups: &mut std::collections::HashMap<String, Vec<QueueGroupMember>>,
         arc_env: &Arc<EventEnvelope>,
-        subject_json: &str,
+        subject: &Subject,
     ) -> usize {
         let mut delivered: usize = 0;
         groups.retain(|_group, members| {
             if members.is_empty() {
                 return false;
             }
-            delivered += self.deliver_one_group(members, arc_env, subject_json);
+            delivered += self.deliver_one_group(members, arc_env, subject);
             !members.is_empty()
         });
         delivered
@@ -284,7 +278,7 @@ impl BrokerEngine {
         &self,
         members: &mut Vec<QueueGroupMember>,
         arc_env: &Arc<EventEnvelope>,
-        subject_json: &str,
+        subject: &Subject,
     ) -> usize {
         let len = members.len();
         let start = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
@@ -297,12 +291,12 @@ impl BrokerEngine {
 
             match members[idx].sender.try_send(Arc::clone(arc_env)) {
                 Ok(()) => {
-                    trace!(subject = subject_json, member = %members[idx].id, "queue-group delivered");
+                    trace!(subject = %subject, member = %members[idx].id, "queue-group delivered");
                     return 1;
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!(
-                        subject = subject_json,
+                        subject = %subject,
                         id = %members[idx].id,
                         "queue group member full, trying next"
                     );
@@ -334,7 +328,7 @@ impl BrokerEngine {
         // Durable consumers.
         self.dispatch_to_durable_consumers(store, envelope);
 
-        debug!(id = %envelope.id, subject = %envelope.subject, delivered, "durable publish completed");
+        debug!(id = %envelope.id, delivered, "durable publish completed");
         Ok(delivered)
     }
 
@@ -343,7 +337,7 @@ impl BrokerEngine {
         store: &Arc<dyn MessageStore>,
         envelope: &EventEnvelope,
     ) {
-        let subject = Subject::from_json(&envelope.subject).ok();
+        let subject = Subject::from_bytes(&envelope.subject).ok();
 
         for entry in self.durable_consumers.iter() {
             let consumer = entry.value();
@@ -384,10 +378,10 @@ impl BrokerEngine {
     fn consumer_matches(
         &self,
         consumer: &DurableConsumer,
-        subject_json: &str,
+        subject_bytes: &[u8],
         subject: Option<&Subject>,
     ) -> bool {
-        if consumer.subject_json == subject_json {
+        if consumer.subject_bytes == subject_bytes {
             return true;
         }
         if let Some(subj) = subject {
@@ -406,24 +400,25 @@ impl BrokerEngine {
     pub fn subscribe_durable(
         &self,
         consumer_name: String,
-        subject_json: String,
+        subject_bytes: Vec<u8>,
         queue_groups: Vec<String>,
         max_in_flight: u32,
         ack_timeout_secs: u32,
     ) -> Result<(u64, mpsc::Receiver<DurableServerMessage>), StoreError> {
         let store = self.store.as_ref().ok_or(StoreError::NotConfigured)?;
 
-        store.register_consumer(&consumer_name, &subject_json, &queue_groups)?;
+        store.register_consumer(&consumer_name, &subject_bytes, &queue_groups)?;
 
         let connection_id = self.rr_counter.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(max_in_flight as usize);
 
-        let subject_pattern = Subject::from_json(&subject_json).unwrap_or_else(|_| Subject::new());
+        let subject_pattern =
+            Subject::from_bytes(&subject_bytes).unwrap_or_else(|_| Subject::new());
 
         let consumer = DurableConsumer {
             connection_id,
             consumer_name: consumer_name.clone(),
-            subject_json: subject_json.clone(),
+            subject_bytes: subject_bytes.clone(),
             subject_pattern,
             sender: tx,
             ack_timeout_secs,
@@ -438,7 +433,6 @@ impl BrokerEngine {
         debug!(
             consumer_name,
             connection_id,
-            subject = subject_json,
             "durable subscription registered"
         );
         Ok((connection_id, rx))
@@ -550,10 +544,10 @@ mod tests {
     use super::*;
     use crate::subscription::SubscriptionReceiver;
 
-    fn make_envelope(subject_json: &str) -> EventEnvelope {
+    fn make_envelope(subject: &Subject) -> EventEnvelope {
         EventEnvelope {
             id: "1".into(),
-            subject: subject_json.into(),
+            subject: subject.to_bytes(),
             payload: vec![1, 2, 3],
             headers: Default::default(),
             timestamp_nanos: 0,
@@ -580,12 +574,11 @@ mod tests {
     async fn test_fanout() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("Subject");
-        let json = subject.to_json();
 
-        let (_id1, mut rx1) = engine.subscribe(json.clone(), vec![]);
-        let (_id2, mut rx2) = engine.subscribe(json.clone(), vec![]);
+        let (_id1, mut rx1) = engine.subscribe(subject.clone(), vec![]);
+        let (_id2, mut rx2) = engine.subscribe(subject.clone(), vec![]);
 
-        let envelope = make_envelope(&json);
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         assert_eq!(delivered, 2);
 
@@ -597,13 +590,12 @@ mod tests {
     async fn test_queue_group() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("QG");
-        let json = subject.to_json();
 
-        let (_id1, mut rx1) = engine.subscribe(json.clone(), vec!["workers".into()]);
-        let (_id2, mut rx2) = engine.subscribe(json.clone(), vec!["workers".into()]);
+        let (_id1, mut rx1) = engine.subscribe(subject.clone(), vec!["workers".into()]);
+        let (_id2, mut rx2) = engine.subscribe(subject.clone(), vec!["workers".into()]);
 
         // Single message: exactly one receives it
-        let envelope = make_envelope(&json);
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         assert_eq!(delivered, 1);
 
@@ -612,8 +604,8 @@ mod tests {
         assert!(got1 ^ got2, "exactly one should receive the message");
 
         // Two messages: round-robin distributes across both subscribers
-        let e1 = make_envelope(&json);
-        let e2 = make_envelope(&json);
+        let e1 = make_envelope(&subject);
+        let e2 = make_envelope(&subject);
         engine.publish(&e1);
         engine.publish(&e2);
 
@@ -630,17 +622,16 @@ mod tests {
     async fn test_multiple_queue_groups() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("MultiQG");
-        let json = subject.to_json();
 
         // Sub1 is in both "workers" and "loggers"
         let (_id1, mut rx1) =
-            engine.subscribe(json.clone(), vec!["workers".into(), "loggers".into()]);
+            engine.subscribe(subject.clone(), vec!["workers".into(), "loggers".into()]);
         // Sub2 is only in "workers"
-        let (_id2, mut rx2) = engine.subscribe(json.clone(), vec!["workers".into()]);
+        let (_id2, mut rx2) = engine.subscribe(subject.clone(), vec!["workers".into()]);
         // Sub3 is only in "loggers"
-        let (_id3, mut rx3) = engine.subscribe(json.clone(), vec!["loggers".into()]);
+        let (_id3, mut rx3) = engine.subscribe(subject.clone(), vec!["loggers".into()]);
 
-        let envelope = make_envelope(&json);
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         // 1 for "workers" group + 1 for "loggers" group = 2
         assert_eq!(delivered, 2);
@@ -655,15 +646,14 @@ mod tests {
     async fn test_fanout_and_queue_group_coexist() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("Mixed");
-        let json = subject.to_json();
 
         // Fanout observer
-        let (_id1, mut rx_fanout) = engine.subscribe(json.clone(), vec![]);
+        let (_id1, mut rx_fanout) = engine.subscribe(subject.clone(), vec![]);
         // Queue group workers
-        let (_id2, mut rx_w1) = engine.subscribe(json.clone(), vec!["workers".into()]);
-        let (_id3, mut rx_w2) = engine.subscribe(json.clone(), vec!["workers".into()]);
+        let (_id2, mut rx_w1) = engine.subscribe(subject.clone(), vec!["workers".into()]);
+        let (_id3, mut rx_w2) = engine.subscribe(subject.clone(), vec!["workers".into()]);
 
-        let envelope = make_envelope(&json);
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         // 1 fanout + 1 from workers group = 2
         assert_eq!(delivered, 2);
@@ -678,15 +668,14 @@ mod tests {
     async fn test_unsubscribe() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("Unsub");
-        let json = subject.to_json();
 
-        let (_id1, rx1) = engine.subscribe(json.clone(), vec![]);
-        let (_id2, mut rx2) = engine.subscribe(json.clone(), vec![]);
+        let (_id1, rx1) = engine.subscribe(subject.clone(), vec![]);
+        let (_id2, mut rx2) = engine.subscribe(subject.clone(), vec![]);
 
         // Dropping the fanout receiver unsubscribes automatically (broadcast).
         drop(rx1);
 
-        let envelope = make_envelope(&json);
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         assert_eq!(delivered, 1);
         assert!(try_recv(&mut rx2).is_some());
@@ -696,7 +685,7 @@ mod tests {
     async fn test_no_subscribers() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("NoOne");
-        let envelope = make_envelope(&subject.to_json());
+        let envelope = make_envelope(&subject);
         assert_eq!(engine.publish(&envelope), 0);
     }
 
@@ -704,29 +693,27 @@ mod tests {
     async fn test_wildcard_subscription() {
         let engine = BrokerEngine::new(16);
 
-        // Subscribe with wildcard: ["job", "*", "logs"]
+        // Subscribe with wildcard: job.*.logs
         let pattern = Subject::new().str("job").any().str("logs");
-        let pattern_json = pattern.to_json();
+        let (_id, mut rx) = engine.subscribe(pattern, vec![]);
 
-        let (_id, mut rx) = engine.subscribe(pattern_json.clone(), vec![]);
-
-        // Publish ["job", 42, "logs"]
+        // Publish job.42.logs
         let subject = Subject::new().str("job").int(42).str("logs");
-        let envelope = make_envelope(&subject.to_json());
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         assert_eq!(delivered, 1);
         assert!(try_recv(&mut rx).is_some());
 
-        // Publish ["job", "abc", "logs"] — should also match
+        // Publish job.abc.logs — should also match
         let subject2 = Subject::new().str("job").str("abc").str("logs");
-        let envelope2 = make_envelope(&subject2.to_json());
+        let envelope2 = make_envelope(&subject2);
         let delivered2 = engine.publish(&envelope2);
         assert_eq!(delivered2, 1);
         assert!(try_recv(&mut rx).is_some());
 
-        // Publish ["other", 42, "logs"] — should NOT match
+        // Publish other.42.logs — should NOT match
         let subject3 = Subject::new().str("other").int(42).str("logs");
-        let envelope3 = make_envelope(&subject3.to_json());
+        let envelope3 = make_envelope(&subject3);
         let delivered3 = engine.publish(&envelope3);
         assert_eq!(delivered3, 0);
     }
@@ -735,24 +722,22 @@ mod tests {
     async fn test_multi_wildcard_subscription() {
         let engine = BrokerEngine::new(16);
 
-        // Subscribe with multi-wildcard: ["job", ">"]
+        // Subscribe with multi-wildcard: job.>
         let pattern = Subject::new().str("job").rest();
-        let pattern_json = pattern.to_json();
+        let (_id, mut rx) = engine.subscribe(pattern, vec![]);
 
-        let (_id, mut rx) = engine.subscribe(pattern_json, vec![]);
-
-        // Publish ["job"] — matches (> matches 0 trailing)
-        let envelope1 = make_envelope(&Subject::new().str("job").to_json());
+        // Publish job — matches (> matches 0 trailing)
+        let envelope1 = make_envelope(&Subject::new().str("job"));
         assert_eq!(engine.publish(&envelope1), 1);
         assert!(try_recv(&mut rx).is_some());
 
-        // Publish ["job", 42, "logs"] — matches
-        let envelope2 = make_envelope(&Subject::new().str("job").int(42).str("logs").to_json());
+        // Publish job.42.logs — matches
+        let envelope2 = make_envelope(&Subject::new().str("job").int(42).str("logs"));
         assert_eq!(engine.publish(&envelope2), 1);
         assert!(try_recv(&mut rx).is_some());
 
-        // Publish ["other"] — no match
-        let envelope3 = make_envelope(&Subject::new().str("other").to_json());
+        // Publish other — no match
+        let envelope3 = make_envelope(&Subject::new().str("other"));
         assert_eq!(engine.publish(&envelope3), 0);
     }
 
@@ -760,22 +745,21 @@ mod tests {
     async fn test_dead_subscriber_cleanup() {
         let engine = BrokerEngine::new(16);
         let subject = Subject::new().str("test").str("Dead");
-        let json = subject.to_json();
 
         // Two fanout subscribers
-        let (_id1, rx1) = engine.subscribe(json.clone(), vec![]);
-        let (_id2, mut rx2) = engine.subscribe(json.clone(), vec![]);
+        let (_id1, rx1) = engine.subscribe(subject.clone(), vec![]);
+        let (_id2, mut rx2) = engine.subscribe(subject.clone(), vec![]);
 
         // Drop rx1 — broadcast automatically stops delivering to it.
         drop(rx1);
 
-        let envelope = make_envelope(&json);
+        let envelope = make_envelope(&subject);
         let delivered = engine.publish(&envelope);
         assert_eq!(delivered, 1);
         assert!(try_recv(&mut rx2).is_some());
 
         // broadcast::Sender::receiver_count() should reflect the drop.
-        let subs = engine.exact_subscriptions.get(&json).unwrap();
+        let subs = engine.exact_subscriptions.get(&subject).unwrap();
         assert_eq!(subs.fanout.receiver_count(), 1);
     }
 }

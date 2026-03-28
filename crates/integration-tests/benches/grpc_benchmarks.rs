@@ -93,12 +93,11 @@ fn bench_e2e_latency(c: &mut Criterion) {
     let client = rt.block_on(HermesClient::connect(&uri)).unwrap();
 
     let subject = Subject::new().str("bench").str("latency");
-    let subject_json = subject.to_json();
     let payload = vec![0u8; 64];
 
     // Create a persistent subscriber stream
     let mut stream = rt
-        .block_on(client.subscribe_raw(&subject_json, &[]))
+        .block_on(client.subscribe_raw(&subject, &[]))
         .unwrap();
 
     group.bench_function("publish_receive_one", |b| {
@@ -153,15 +152,14 @@ fn bench_grpc_fanout(c: &mut Criterion) {
                                 .str("grpcfan")
                                 .str(format!("{num_subs}"))
                                 .str(format!("i{iter_idx}"));
-                            let subject_json = subject.to_json();
 
                             // Subscribe N clients
                             let mut handles = Vec::with_capacity(num_subs as usize);
                             for _ in 0..num_subs {
                                 let c = client.clone();
-                                let sj = subject_json.clone();
+                                let s = subject.clone();
                                 handles.push(tokio::spawn(async move {
-                                    let mut stream = c.subscribe_raw(&sj, &[]).await.unwrap();
+                                    let mut stream = c.subscribe_raw(&s, &[]).await.unwrap();
                                     let mut count = 0_u64;
                                     while count < num_messages {
                                         if stream.next().await.is_some() {

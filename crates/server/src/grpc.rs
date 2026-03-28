@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use hermes_core::Subject;
 use hermes_proto::{
     DurableClientMessage, DurableServerMessage, EventEnvelope, PublishAck, PublishDurableAck,
     SubscribeRequest, broker_server::Broker, durable_client_message::Msg as ClientMsg,
@@ -66,10 +67,12 @@ impl Broker for BrokerService {
             return Err(Status::invalid_argument("subject must not be empty"));
         }
 
-        let (id, receiver) = self.engine.subscribe(req.subject.clone(), req.queue_groups);
+        let subject = Subject::from_bytes(&req.subject)
+            .map_err(|e| Status::invalid_argument(format!("invalid subject: {e}")))?;
+
+        let (id, receiver) = self.engine.subscribe(subject.clone(), req.queue_groups);
 
         let (tx_out, rx_out) = tokio::sync::mpsc::channel(self.config.grpc_output_buffer);
-        let subject = req.subject.clone();
         let engine = self.engine.clone();
 
         tokio::spawn(async move {
@@ -85,7 +88,7 @@ impl Broker for BrokerService {
                                     }
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!(subject, "subscriber lagged, missed {n} messages");
+                                    warn!(subject = %subject, "subscriber lagged, missed {n} messages");
                                     continue;
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -112,7 +115,7 @@ impl Broker for BrokerService {
                 },
             }
             engine.unsubscribe(&subject, id);
-            debug!(subject, %id, "subscriber stream ended");
+            debug!(subject = %subject, %id, "subscriber stream ended");
         });
 
         Ok(Response::new(ReceiverStream::new(rx_out)))
@@ -201,6 +204,10 @@ impl Broker for BrokerService {
         if sub_req.consumer_name.is_empty() {
             return Err(Status::invalid_argument("consumer_name must not be empty"));
         }
+
+        // Validate subject is well-formed
+        let _subject = Subject::from_bytes(&sub_req.subject)
+            .map_err(|e| Status::invalid_argument(format!("invalid subject: {e}")))?;
 
         let max_in_flight = if sub_req.max_in_flight == 0 {
             self.config.default_max_in_flight

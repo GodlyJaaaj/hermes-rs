@@ -52,11 +52,11 @@ pub trait MessageStore: Send + Sync + 'static {
     /// Persist a message. Called before any dispatch.
     fn persist(&self, envelope: &EventEnvelope) -> Result<(), StoreError>;
 
-    /// Register a durable consumer for a subject.
+    /// Register a durable consumer for a subject (bincode-encoded bytes).
     fn register_consumer(
         &self,
         consumer_name: &str,
-        subject: &str,
+        subject: &[u8],
         queue_groups: &[String],
     ) -> Result<(), StoreError>;
 

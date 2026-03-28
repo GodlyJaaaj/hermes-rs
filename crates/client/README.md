@@ -111,6 +111,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Custom subjects with `publish_on` / `subscribe_on`
+
+When `#[derive(Event)]` auto-subjects are too static, use **custom subjects**
+to route messages dynamically — for example, with an entity ID in the subject.
+
+### Building a `Subject`
+
+`Subject` uses a fluent builder:
+
+```rust
+use hermes_core::Subject;
+
+// Concrete subject (no wildcards)
+let subject = Subject::new().str("order").int(42).str("status");
+// Display: "order.42.status"
+
+// Pattern subject (with wildcards)
+let pattern = Subject::new().str("order").any().str("status");
+// Display: "order.*.status"
+
+// Trailing wildcard — matches zero or more remaining segments
+let catch_all = Subject::new().str("order").rest();
+// Display: "order.>"
+// Matches: "order", "order.42", "order.42.status", ...
+
+// From a dot-separated string (integers are auto-parsed)
+let s = Subject::from("order.42.status");
+```
+
+### Segment constructors
+
+| Constructor | Produces | Display |
+|---|---|---|
+| `.str("x")` | `Segment::Str("x")` | `x` |
+| `.int(42)` | `Segment::Int(42)` | `42` |
+| `.any()` | `Segment::Any` | `*` |
+| `.rest()` | `Segment::Rest` | `>` |
+| `.segment(seg)` | any `Segment` value | — |
+
+For standalone use: `Segment::s("x")`, `Segment::i(42)`, `Segment::any()`, `Segment::rest()`.
+
+### `subscribe_on` — exemples pratiques
+
+```rust,ignore
+use hermes_client::HermesClient;
+use hermes_core::{Event, Subject};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Event)]
+struct JobLogs { line: String }
+
+async fn examples(client: &HermesClient) -> Result<(), Box<dyn std::error::Error>> {
+    // Écouter UN job spécifique (runtime)
+    let job_id = "abc-123";
+    let mut stream = client.subscribe_on::<JobLogs>(
+        &Subject::new().str("job").str(job_id).str("logs"),  // concret, pas de wildcard
+        &[],
+    ).await?;
+
+    // Écouter TOUS les jobs (wildcard)
+    let mut stream = client.subscribe_on::<JobLogs>(
+        &Subject::new().str("job").any().str("logs"),  // * = n'importe quel segment
+        &[],
+    ).await?;
+
+    // Écouter les jobs qui commencent par "build" (runtime + wildcard)
+    let prefix = "build";
+    let mut stream = client.subscribe_on::<JobLogs>(
+        &Subject::new().str("job").str(prefix).rest(),  // job.build.>
+        &[],
+    ).await?;
+
+    Ok(())
+}
+```
+
 ## Event subjects with `derive(Event)`
 
 By default, `#[derive(Event)]` generates a subject from `module_path + type_name`.
@@ -172,10 +248,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## `BatchPublisher` — high-throughput publishing
+
+`BatchPublisher` keeps a single gRPC client-stream open. All messages flow
+through the same HTTP/2 stream, avoiding per-message round-trip overhead.
+
+```rust,no_run
+use hermes_client::HermesClient;
+use hermes_core::{Event, Subject};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Event)]
+struct Metric { name: String, value: f64 }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = HermesClient::connect("http://127.0.0.1:4222").await?;
+    let batch = client.batch_publisher();
+
+    // Send many events through the same stream
+    for i in 0..10_000 {
+        batch.send(&Metric { name: format!("cpu.{i}"), value: 0.42 }).await?;
+    }
+
+    // Or send raw payloads on a custom subject
+    let subject = Subject::new().str("metrics").str("raw");
+    batch.send_raw(&subject, b"raw payload".to_vec()).await?;
+
+    // Close the stream and get the server ack
+    let ack = batch.flush().await?;
+    println!("server accepted {} messages", ack.accepted);
+    Ok(())
+}
+```
+
 ## Durable subscriptions — at-least-once delivery
 
 Durable mode persists messages server-side. Consumers **ack** or **nack**
 each message; un-acked messages are automatically redelivered.
+
+Requires the server to be configured with a store path (`HERMES_STORE_PATH`).
 
 ```rust,no_run
 use hermes_client::HermesClient;
@@ -207,18 +319,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Core API
+| Parameter | Description |
+|---|---|
+| `consumer_name` | Unique name for this consumer. Reusing the name resumes from the last acked offset. |
+| `queue_groups` | Empty for fanout, or group names for load-balanced delivery. |
+| `max_in_flight` | Maximum un-acked messages before the broker pauses delivery. |
+| `ack_timeout_secs` | Seconds before un-acked messages are redelivered. |
+
+## API reference
 
 | Method | Description |
-|--------|-------------|
+|---|---|
 | `HermesClient::connect(uri)` | Connect to a Hermes broker |
-| `publish(&event)` | Fire-and-forget publish |
+| `publish(&event)` | Fire-and-forget publish (auto subject) |
+| `publish_on(&event, &subject)` | Fire-and-forget publish on a custom subject |
 | `publish_durable(&event)` | Durable publish (persisted before ack) |
-| `subscribe::<E>(queue_groups)` | Typed fire-and-forget subscription |
+| `subscribe::<E>(queue_groups)` | Typed subscription (auto subject) |
+| `subscribe_on::<E>(&subject, queue_groups)` | Typed subscription on a custom subject (supports wildcards) |
 | `subscribe_group::<G>(queue_groups)` | Event-group subscription (multiple types) |
-| `subscribe_durable::<E>(name, max_in_flight, ack_timeout)` | Durable subscription with ack/nack |
+| `subscribe_durable::<E>(name, groups, max, timeout)` | Durable subscription with ack/nack |
 | `batch_publisher()` | High-throughput buffered publisher |
-| `publish_raw(envelope)` / `subscribe_raw(subject, groups)` | Untyped raw envelope API |
+| `publish_raw(&subject, payload)` | Untyped raw publish |
+| `subscribe_raw(&subject, groups)` | Untyped raw subscription |
 
 ## Notes
 

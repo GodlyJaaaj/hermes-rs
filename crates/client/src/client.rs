@@ -39,7 +39,31 @@ impl HermesClient {
     /// Publish a single typed event (fire-and-forget).
     pub async fn publish<E: Event>(&self, event: &E) -> Result<(), ClientError> {
         let envelope = make_envelope(event)?;
-        trace!(subject = %envelope.subject, id = %envelope.id, "publishing event");
+        trace!(id = %envelope.id, "publishing event");
+        let stream = tokio_stream::once(envelope);
+        let mut client = self.inner.clone();
+        let _ack = client.publish(stream).await?;
+        Ok(())
+    }
+
+    /// Publish a typed event on a custom subject.
+    ///
+    /// Use this when you need a dynamic subject (e.g. with an entity ID)
+    /// instead of the auto-generated subject from `#[derive(Event)]`.
+    pub async fn publish_on<E: Event>(
+        &self,
+        event: &E,
+        subject: &Subject,
+    ) -> Result<(), ClientError> {
+        let payload = hermes_core::encode(event)?;
+        let envelope = EventEnvelope {
+            id: Uuid::now_v7().to_string(),
+            subject: subject.to_bytes(),
+            payload,
+            headers: Default::default(),
+            timestamp_nanos: now_nanos(),
+        };
+        trace!(subject = %subject, id = %envelope.id, "publishing event on custom subject");
         let stream = tokio_stream::once(envelope);
         let mut client = self.inner.clone();
         let _ack = client.publish(stream).await?;
@@ -68,6 +92,37 @@ impl HermesClient {
         subscriber::subscribe_group(client, queue_groups).await
     }
 
+    /// Subscribe on a custom subject with typed deserialization.
+    ///
+    /// Accepts any subject including wildcards:
+    /// ```ignore
+    /// use hermes_core::Subject;
+    /// let stream = client.subscribe_on::<MyEvent>(
+    ///     &Subject::new().str("job").any().str("logs"),
+    ///     &[],
+    /// ).await?;
+    /// ```
+    pub async fn subscribe_on<E: Event>(
+        &self,
+        subject: &Subject,
+        queue_groups: &[&str],
+    ) -> Result<impl Stream<Item = Result<E, ClientError>> + use<E>, ClientError> {
+        debug!(subject = %subject, "subscribing on custom subject (typed)");
+
+        let request = SubscribeRequest {
+            subject: subject.to_bytes(),
+            queue_groups: queue_groups.iter().map(|s| s.to_string()).collect(),
+        };
+        let mut client = self.inner.clone();
+        let response = client.subscribe(request).await?;
+        let inner = response.into_inner();
+
+        Ok(inner.map(|result| {
+            let envelope = result.map_err(ClientError::Rpc)?;
+            hermes_core::decode::<E>(&envelope.payload).map_err(ClientError::Decode)
+        }))
+    }
+
     /// Create a BatchPublisher for high-throughput publishing.
     pub fn batch_publisher(&self) -> BatchPublisher {
         let (tx, rx) = mpsc::channel(8192);
@@ -88,7 +143,7 @@ impl HermesClient {
     /// Publish a single typed event with durability (persisted before ack).
     pub async fn publish_durable<E: Event>(&self, event: &E) -> Result<(), ClientError> {
         let envelope = make_envelope(event)?;
-        trace!(subject = %envelope.subject, id = %envelope.id, "publishing durable event");
+        trace!(id = %envelope.id, "publishing durable event");
         let stream = tokio_stream::once(envelope);
         let mut client = self.inner.clone();
         let _ack = client.publish_durable(stream).await?;
@@ -110,7 +165,7 @@ impl HermesClient {
         // Multi-subject durable subscriptions can be added later.
         let subject = subjects.first().ok_or_else(|| ClientError::ChannelClosed)?;
 
-        debug!(consumer_name, subject = %subject.to_json(), max_in_flight, ack_timeout_secs, "subscribing durable");
+        debug!(consumer_name, subject = %subject, max_in_flight, ack_timeout_secs, "subscribing durable");
 
         durable_subscriber::subscribe_durable(
             client,
@@ -133,27 +188,27 @@ impl HermesClient {
     ) -> Result<(), ClientError> {
         let envelope = EventEnvelope {
             id: Uuid::now_v7().to_string(),
-            subject: subject.to_json(),
+            subject: subject.to_bytes(),
             payload,
             headers: Default::default(),
             timestamp_nanos: now_nanos(),
         };
-        trace!(subject = %envelope.subject, id = %envelope.id, "publishing raw event");
+        trace!(subject = %subject, id = %envelope.id, "publishing raw event");
         let stream = tokio_stream::once(envelope);
         let mut client = self.inner.clone();
         let _ack = client.publish(stream).await?;
         Ok(())
     }
 
-    /// Subscribe to a raw subject (JSON-encoded subject array, e.g. `["job","*","logs"]`).
+    /// Subscribe to a raw subject.
     /// Returns raw `EventEnvelope`s — useful for debugging, REPL, or dynamic subjects.
     pub async fn subscribe_raw(
         &self,
-        subject_json: &str,
+        subject: &Subject,
         queue_groups: &[&str],
     ) -> Result<impl Stream<Item = Result<EventEnvelope, ClientError>> + use<>, ClientError> {
         let request = SubscribeRequest {
-            subject: subject_json.to_string(),
+            subject: subject.to_bytes(),
             queue_groups: queue_groups.iter().map(|s| s.to_string()).collect(),
         };
         let mut client = self.inner.clone();
