@@ -773,15 +773,9 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-2", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
+        store.persist(&test_envelope("msg-2", &subject)).unwrap();
 
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert_eq!(pending.len(), 2);
@@ -794,12 +788,8 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
 
         let pending = store.fetch_pending("worker-1", 10).unwrap();
@@ -811,12 +801,8 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         store.ack("msg-1", "worker-1").unwrap();
 
@@ -831,12 +817,8 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         let pending = store.fetch_pending("worker-1", 10).unwrap();
         assert_eq!(pending.len(), 0);
@@ -851,12 +833,8 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         store.nack("msg-1", "worker-1", false).unwrap();
 
@@ -871,12 +849,8 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
         store.mark_delivered("msg-1", "worker-1", 1000).unwrap();
 
         // Not expired yet.
@@ -894,12 +868,8 @@ mod tests {
         let store = RedbMessageStore::open_temporary().unwrap();
         let subject = test_subject("orders.Created");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject))
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject)).unwrap();
         store.mark_delivered("msg-1", "worker-1", u64::MAX).unwrap();
         store.ack("msg-1", "worker-1").unwrap();
 
@@ -916,12 +886,8 @@ mod tests {
         let subject = test_subject("orders.Created");
         let subject2 = test_subject("orders.Shipped");
 
-        store
-            .register_consumer("worker-1", &subject, &[])
-            .unwrap();
-        store
-            .register_consumer("worker-2", &subject2, &[])
-            .unwrap();
+        store.register_consumer("worker-1", &subject, &[]).unwrap();
+        store.register_consumer("worker-2", &subject2, &[]).unwrap();
 
         let mut consumers = store.list_consumers().unwrap();
         consumers.sort();
@@ -934,15 +900,9 @@ mod tests {
         let subject1 = test_subject("orders.Created");
         let subject2 = test_subject("orders.Shipped");
 
-        store
-            .register_consumer("worker-1", &subject1, &[])
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-1", &subject1))
-            .unwrap();
-        store
-            .persist(&test_envelope("msg-2", &subject2))
-            .unwrap();
+        store.register_consumer("worker-1", &subject1, &[]).unwrap();
+        store.persist(&test_envelope("msg-1", &subject1)).unwrap();
+        store.persist(&test_envelope("msg-2", &subject2)).unwrap();
 
         // worker-1 only sees orders.Created.
         let pending = store.fetch_pending("worker-1", 10).unwrap();

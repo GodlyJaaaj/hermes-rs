@@ -152,11 +152,7 @@ fn bench_queue_group_vs_fanout(c: &mut Criterion) {
         let envelope = make_envelope(&subject, 128);
 
         let mut receivers: Vec<SubscriptionReceiver> = (0..members)
-            .map(|_| {
-                engine
-                    .subscribe(subject.clone(), vec!["workers".into()])
-                    .1
-            })
+            .map(|_| engine.subscribe(subject.clone(), vec!["workers".into()]).1)
             .collect();
 
         b.iter_custom(|iters| {
@@ -222,10 +218,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
         drop(_rx);
 
         let mut rx = engine
-            .subscribe(
-                Subject::new().str("bench").any().str("test"),
-                vec![],
-            )
+            .subscribe(Subject::new().str("bench").any().str("test"), vec![])
             .1;
 
         b.iter_custom(|iters| {
@@ -269,10 +262,7 @@ fn bench_wildcard_matching(c: &mut Criterion) {
         // Add 100 wildcard subscriptions on OTHER subjects
         let _others: Vec<SubscriptionReceiver> = (0..100)
             .map(|i| {
-                let sub = Subject::new()
-                    .str("other")
-                    .str(i.to_string())
-                    .rest();
+                let sub = Subject::new().str("other").str(i.to_string()).rest();
                 engine.subscribe(sub, vec![]).1
             })
             .collect();
@@ -378,10 +368,7 @@ fn bench_publish_baseline(c: &mut Criterion) {
         // 100 wildcard subscriptions on other subjects
         let _others: Vec<SubscriptionReceiver> = (0..100)
             .map(|i| {
-                let sub = Subject::new()
-                    .str("noise")
-                    .str(i.to_string())
-                    .rest();
+                let sub = Subject::new().str("noise").str(i.to_string()).rest();
                 engine.subscribe(sub, vec![]).1
             })
             .collect();
@@ -463,9 +450,7 @@ fn bench_lookup_throughput(c: &mut Criterion) {
                     .collect();
 
                 // Publish to a subject that matches the last subscription
-                let target = Subject::new()
-                    .str("topic")
-                    .str((n - 1).to_string());
+                let target = Subject::new().str("topic").str((n - 1).to_string());
                 let envelope = make_envelope(&target, 64);
 
                 b.iter_custom(|iters| {
@@ -503,19 +488,13 @@ fn bench_large_scale_wildcards(c: &mut Criterion) {
                 // Create N wildcard subscriptions: "sensor.{i}.*"
                 let _receivers: Vec<SubscriptionReceiver> = (0..n)
                     .map(|i| {
-                        let sub = Subject::new()
-                            .str("sensor")
-                            .str(i.to_string())
-                            .any();
+                        let sub = Subject::new().str("sensor").str(i.to_string()).any();
                         engine.subscribe(sub, vec![]).1
                     })
                     .collect();
 
                 // Publish to a matching subject: "sensor.0.temperature"
-                let pub_subject = Subject::new()
-                    .str("sensor")
-                    .str("0")
-                    .str("temperature");
+                let pub_subject = Subject::new().str("sensor").str("0").str("temperature");
                 let envelope = make_envelope(&pub_subject, 64);
 
                 b.iter_custom(|iters| {

@@ -71,8 +71,7 @@ pub(crate) async fn subscribe_group<G: EventGroup>(
 
         let mapped = inner.map(move |result| {
             let envelope = result.map_err(ClientError::Rpc)?;
-            let subject = Subject::from_bytes(&envelope.subject)
-                .map_err(ClientError::Decode)?;
+            let subject = Subject::from_bytes(&envelope.subject).map_err(ClientError::Decode)?;
             G::decode_event(&subject, &envelope.payload).map_err(ClientError::Decode)
         });
 

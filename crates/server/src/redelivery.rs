@@ -64,8 +64,8 @@ pub fn spawn_redelivery_loop(
                 for stored in expired {
                     if stored.attempt > max_attempts {
                         // Dead-letter: publish on _dead_letter.{subject} and mark as dead-lettered
-                        let original_subject = Subject::from_bytes(&stored.envelope.subject)
-                            .unwrap_or_default();
+                        let original_subject =
+                            Subject::from_bytes(&stored.envelope.subject).unwrap_or_default();
                         let dead_subject = Subject::new()
                             .str("_dead_letter")
                             .segment(hermes_core::Segment::s(original_subject.to_string()));

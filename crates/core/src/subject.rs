@@ -268,8 +268,7 @@ impl Subject {
 
     /// Deserialize from bincode bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::DecodeError> {
-        let (val, _) =
-            bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+        let (val, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
         Ok(val)
     }
 
@@ -463,5 +462,4 @@ mod tests {
     fn rest_must_be_last() {
         Subject::new().str("a").rest().str("b");
     }
-
 }

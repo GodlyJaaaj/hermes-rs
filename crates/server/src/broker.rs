@@ -432,8 +432,7 @@ impl BrokerEngine {
 
         debug!(
             consumer_name,
-            connection_id,
-            "durable subscription registered"
+            connection_id, "durable subscription registered"
         );
         Ok((connection_id, rx))
     }

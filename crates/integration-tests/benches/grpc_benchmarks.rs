@@ -96,9 +96,7 @@ fn bench_e2e_latency(c: &mut Criterion) {
     let payload = vec![0u8; 64];
 
     // Create a persistent subscriber stream
-    let mut stream = rt
-        .block_on(client.subscribe_raw(&subject, &[]))
-        .unwrap();
+    let mut stream = rt.block_on(client.subscribe_raw(&subject, &[])).unwrap();
 
     group.bench_function("publish_receive_one", |b| {
         b.iter_custom(|iters| {
