@@ -1,5 +1,6 @@
 [package]
 name = "hermes-broker-server"
+description = "gRPC server for the Hermes message broker"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

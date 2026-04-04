@@ -1,5 +1,6 @@
 [package]
 name = "hermes-broker-proto"
+description = "Protobuf and gRPC service definitions for the Hermes message broker"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

@@ -11,11 +11,11 @@ keywords = ["messaging", "broker", "grpc", "pubsub", "events"]
 categories = ["network-programming", "asynchronous"]
 
 [workspace.dependencies]
-# ── Internal crates (path-only, aliases keep imports short) ──
-hermes-proto  = { package = "hermes-broker-proto",   path = "crates/proto" }
-hermes-broker = { package = "hermes-broker-core",    path = "crates/core" }
-hermes-client = { package = "hermes-broker-client",  path = "crates/client" }
-hermes-server = { package = "hermes-broker-server",  path = "crates/server" }
+# ── Internal crates (version pinned to workspace.package.version) ──
+hermes-proto  = { package = "hermes-broker-proto",   path = "crates/proto",   version = "0.5.0" }
+hermes-broker = { package = "hermes-broker-core",    path = "crates/core",    version = "0.5.0" }
+hermes-client = { package = "hermes-broker-client",  path = "crates/client",  version = "0.5.0" }
+hermes-server = { package = "hermes-broker-server",  path = "crates/server",  version = "0.5.0" }
 
 # ── gRPC / protobuf ──
 tonic              = "0.14"

@@ -1,5 +1,6 @@
 [package]
 name = "hermes-broker-client"
+description = "gRPC client library for the Hermes message broker — publisher and subscriber"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

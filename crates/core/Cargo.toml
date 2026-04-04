@@ -1,5 +1,6 @@
 [package]
 name = "hermes-broker-core"
+description = "Core routing engine for the Hermes message broker — trie-based subject matching, fanout and queue groups"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
