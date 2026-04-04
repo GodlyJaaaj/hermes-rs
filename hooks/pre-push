@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-push hook: block push if cargo fmt detects unformatted code.
+
+echo "pre-push: checking cargo fmt..."
+
+cargo fmt --check 2>&1
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "ERROR: code is not formatted. Run 'cargo fmt' before pushing."
+    exit 1
+fi
+
+echo "pre-push: formatting OK"
+exit 0

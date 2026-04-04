@@ -1,0 +1,14 @@
+[package]
+name = "hermes-broker-client"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hermes-proto.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tokio-stream.workspace = true
+bytes.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,36 @@
+syntax = "proto3";
+package hermes.broker.v1;
+
+service Broker {
+  // Fire-and-forget: client streams messages, gets total count when done.
+  rpc Publish(stream PublishRequest) returns (PublishAck);
+
+  // Subscribe: client sends sub commands, receives messages.
+  rpc Subscribe(stream SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+message PublishRequest {
+  string subject = 1;
+  bytes payload = 2;
+  string reply_to = 3;
+}
+
+message PublishAck {
+  uint64 total_published = 1;
+}
+
+message SubscribeRequest {
+  Sub sub = 1;
+}
+
+message Sub {
+  string subject = 1;
+  string queue_group = 2;
+}
+
+message SubscribeResponse {
+  string subject = 1;
+  bytes payload = 2;
+  uint64 sequence = 3;
+  string reply_to = 4;
+}
