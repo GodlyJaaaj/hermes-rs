@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use smallvec::SmallVec;
 
 /// Unique identifier for a routing slot (broadcast or queue-group).
+///
+/// Allocated by [`SlotMap`](crate::slot::SlotMap) and used as a key in both
+/// the slot map and the trie.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SlotId(pub u64);
 
@@ -10,6 +13,10 @@ pub struct SlotId(pub u64);
 ///
 /// Subjects are dot-separated tokens (e.g. `orders.eu.created`).
 /// Wildcards: `*` matches exactly one token, `>` matches one or more trailing tokens.
+///
+/// The trie is the primary index for routing published messages to matching
+/// subscriber slots. It supports exact, single-wildcard, and tail-match lookups
+/// in a single traversal.
 #[derive(Default)]
 pub struct TrieNode {
     children: HashMap<Box<str>, TrieNode>,
@@ -22,6 +29,7 @@ pub struct TrieNode {
 }
 
 impl TrieNode {
+    /// Create an empty trie node.
     pub fn new() -> Self {
         Self {
             children: HashMap::new(),

@@ -60,8 +60,10 @@ impl Publisher {
     }
 }
 
+/// Errors returned by [`Publisher::publish`].
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
+    /// The connection to the broker has been lost.
     #[error("disconnected from broker")]
     Disconnected,
 }

@@ -10,11 +10,15 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Streaming};
 use tracing::{debug, info, warn};
 
+/// gRPC implementation of the Hermes [`Broker`] service.
+///
+/// Bridges incoming gRPC streams to the core router via [`RouterCmd`] messages.
 pub struct BrokerService {
     router_tx: mpsc::Sender<RouterCmd>,
 }
 
 impl BrokerService {
+    /// Create a new broker service backed by the given router command channel.
     pub fn new(router_tx: mpsc::Sender<RouterCmd>) -> Self {
         Self { router_tx }
     }

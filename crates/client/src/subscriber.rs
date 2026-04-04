@@ -73,8 +73,10 @@ impl Subscriber {
     }
 }
 
+/// Errors returned by [`Subscriber::subscribe`].
 #[derive(Debug, thiserror::Error)]
 pub enum SubscribeError {
+    /// The connection to the broker has been lost.
     #[error("disconnected from broker")]
     Disconnected,
 }

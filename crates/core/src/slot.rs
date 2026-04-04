@@ -13,9 +13,13 @@ pub struct SubId(pub u64);
 /// A message routed through the broker.
 #[derive(Clone, Debug)]
 pub struct Delivery {
+    /// The subject the message was published to (e.g. `orders.eu.created`).
     pub subject: Box<str>,
+    /// Raw message payload.
     pub payload: Bytes,
+    /// Monotonically increasing sequence number assigned by the router.
     pub sequence: u64,
+    /// Optional reply-to subject for request/reply patterns.
     pub reply_to: Option<Box<str>>,
 }
 
@@ -42,17 +46,26 @@ pub enum Slot {
 
 /// Handle returned to the subscriber so it can receive deliveries.
 pub enum SubHandle {
+    /// Fanout subscription — receives a clone of every matching message.
     Fanout {
+        /// Unique subscriber identifier.
         sub_id: SubId,
+        /// Broadcast receiver for incoming deliveries.
         rx: broadcast::Receiver<Delivery>,
     },
+    /// Queue group member — receives messages round-robin with other members.
     QueueMember {
+        /// Unique subscriber identifier.
         sub_id: SubId,
+        /// mpsc receiver for incoming deliveries.
         rx: mpsc::Receiver<Delivery>,
     },
 }
 
-/// Manages all slots and the mapping from (subject, group) to SlotId.
+/// Manages all routing slots and the mapping from (subject, queue group) to [`SlotId`].
+///
+/// Handles subscriber registration, slot lifecycle, and cleanup on disconnect.
+/// Used exclusively by the [`Router`](crate::router::Router).
 #[derive(Default)]
 pub struct SlotMap {
     slots: HashMap<SlotId, Slot>,
@@ -65,6 +78,7 @@ pub struct SlotMap {
 }
 
 impl SlotMap {
+    /// Create an empty slot map.
     pub fn new() -> Self {
         Self {
             slots: HashMap::new(),

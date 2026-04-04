@@ -1,3 +1,30 @@
+//! Client library for the Hermes message broker.
+//!
+//! Provides [`Publisher`] for fire-and-forget message publishing and [`Subscriber`]
+//! for receiving messages over a gRPC stream.
+//!
+//! # Quick start
+//!
+//! ```rust,no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use hermes_broker_client::{connect, Publisher, Subscriber};
+//!
+//! let channel = connect("http://[::1]:50051").await?;
+//!
+//! // Publish
+//! let publisher = Publisher::new(channel.clone()).await?;
+//! publisher.publish("orders.eu.created", &b"hello"[..]).await?;
+//!
+//! // Subscribe
+//! let mut subscriber = Subscriber::new(channel).await?;
+//! subscriber.subscribe("orders.>", None).await?;
+//! while let Some(msg) = subscriber.recv().await {
+//!     println!("{}: {:?}", msg.subject, msg.payload);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+
 mod publisher;
 mod subscriber;
 
