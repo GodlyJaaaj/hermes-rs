@@ -20,9 +20,7 @@ pub enum RouterCmd {
         reply: oneshot::Sender<SubHandle>,
     },
     /// Clean up a subscriber (stream closed / disconnected).
-    Disconnect {
-        sub_id: crate::slot::SubId,
-    },
+    Disconnect { sub_id: crate::slot::SubId },
 }
 
 /// Configuration for the router.
@@ -171,7 +169,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RouterCmd::Subscribe {
             subject: Box::from(subject),
-            queue_group: queue_group.map(|s| Box::from(s)),
+            queue_group: queue_group.map(Box::from),
             reply: reply_tx,
         })
         .await
@@ -222,10 +220,7 @@ mod tests {
         }
 
         match (handle1, handle2) {
-            (
-                SubHandle::QueueMember { mut rx, .. },
-                SubHandle::QueueMember { rx: mut rx2, .. },
-            ) => {
+            (SubHandle::QueueMember { mut rx, .. }, SubHandle::QueueMember { rx: mut rx2, .. }) => {
                 let m0a = rx.recv().await.unwrap();
                 let m1a = rx2.recv().await.unwrap();
                 let m0b = rx.recv().await.unwrap();

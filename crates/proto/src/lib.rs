@@ -8,5 +8,4 @@ pub mod hermes {
 
 pub use hermes::broker::v1::*;
 
-pub const FILE_DESCRIPTOR_SET: &[u8] =
-    tonic::include_file_descriptor_set!("broker_descriptor");
+pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("broker_descriptor");

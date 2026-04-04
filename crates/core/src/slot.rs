@@ -52,6 +52,7 @@ pub enum SubHandle {
 }
 
 /// Manages all slots and the mapping from (subject, group) to SlotId.
+#[derive(Default)]
 pub struct SlotMap {
     slots: HashMap<SlotId, Slot>,
     /// (subject, queue_group_or_empty) → SlotId
@@ -112,8 +113,13 @@ impl SlotMap {
         // New broadcast slot.
         let slot_id = self.alloc_slot_id();
         let (sender, rx) = broadcast::channel(broadcast_capacity);
-        self.slots
-            .insert(slot_id, Slot::Broadcast { sender, sub_count: 1 });
+        self.slots.insert(
+            slot_id,
+            Slot::Broadcast {
+                sender,
+                sub_count: 1,
+            },
+        );
         self.index.insert(key, slot_id);
         self.sub_slots
             .entry(sub_id)
@@ -135,15 +141,15 @@ impl SlotMap {
         let sub_id = self.alloc_sub_id();
         let (tx, rx) = mpsc::channel(channel_capacity);
 
-        if let Some(&slot_id) = self.index.get(&key) {
-            if let Some(Slot::QueueGroup { members, .. }) = self.slots.get_mut(&slot_id) {
-                members.push(QueueMember { sub_id, tx });
-                self.sub_slots
-                    .entry(sub_id)
-                    .or_default()
-                    .push((slot_id, Box::from(subject)));
-                return (SubHandle::QueueMember { sub_id, rx }, None);
-            }
+        if let Some(&slot_id) = self.index.get(&key)
+            && let Some(Slot::QueueGroup { members, .. }) = self.slots.get_mut(&slot_id)
+        {
+            members.push(QueueMember { sub_id, tx });
+            self.sub_slots
+                .entry(sub_id)
+                .or_default()
+                .push((slot_id, Box::from(subject)));
+            return (SubHandle::QueueMember { sub_id, rx }, None);
         }
 
         // New queue group slot.

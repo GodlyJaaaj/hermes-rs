@@ -175,8 +175,7 @@ async fn queue_group_round_robin() {
 
     let mut all_payloads = Vec::new();
     for sub in [&mut sub1, &mut sub2] {
-        while let Ok(Some(msg)) =
-            tokio::time::timeout(Duration::from_millis(500), sub.recv()).await
+        while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(500), sub.recv()).await
         {
             all_payloads.push(String::from_utf8(msg.payload).unwrap());
         }

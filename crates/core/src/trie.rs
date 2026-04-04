@@ -10,6 +10,7 @@ pub struct SlotId(pub u64);
 ///
 /// Subjects are dot-separated tokens (e.g. `orders.eu.created`).
 /// Wildcards: `*` matches exactly one token, `>` matches one or more trailing tokens.
+#[derive(Default)]
 pub struct TrieNode {
     children: HashMap<Box<str>, TrieNode>,
     /// `*` wildcard child — matches any single token.
@@ -50,10 +51,7 @@ impl TrieNode {
                 node.insert(rest, slot_id);
             }
             [token, rest @ ..] => {
-                let node = self
-                    .children
-                    .entry(Box::from(*token))
-                    .or_insert_with(TrieNode::new);
+                let node = self.children.entry(Box::from(*token)).or_default();
                 node.insert(rest, slot_id);
             }
         }

@@ -1,10 +1,10 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use hermes_broker::router::{Router, RouterCmd, RouterConfig};
-use hermes_broker::slot::SubHandle;
+use hermes_broker_core::router::{Router, RouterCmd, RouterConfig};
+use hermes_broker_core::slot::SubHandle;
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, oneshot};
 
@@ -84,9 +84,9 @@ fn bench_fanout_e2e(c: &mut Criterion) {
                                                     return;
                                                 }
                                             }
-                                            Err(tokio::sync::broadcast::error::RecvError::Lagged(
-                                                _,
-                                            )) => continue,
+                                            Err(
+                                                tokio::sync::broadcast::error::RecvError::Lagged(_),
+                                            ) => continue,
                                             Err(
                                                 tokio::sync::broadcast::error::RecvError::Closed,
                                             ) => return,
@@ -226,7 +226,7 @@ fn bench_wildcard_e2e(c: &mut Criterion) {
                                     }
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
+                                    continue;
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                             }
