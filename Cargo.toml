@@ -36,5 +36,9 @@ smallvec = "2.0.0-alpha.12"
 # ── Error handling ──
 thiserror = "2"
 
+# ── Observability ──
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
 # ── Bench / test ──
 criterion = { version = "0.8", features = ["async_tokio"] }

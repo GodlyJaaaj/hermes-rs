@@ -6,13 +6,16 @@ pub use subscriber::Subscriber;
 
 use hermes_proto::broker_client::BrokerClient;
 use tonic::transport::Channel;
+use tracing::{debug, info};
 
 /// Connect to a hermes broker and return a channel for creating publishers/subscribers.
 pub async fn connect(addr: &str) -> Result<Channel, tonic::transport::Error> {
+    debug!(addr, "connecting to hermes broker");
     let channel = Channel::from_shared(addr.to_string())
         .expect("invalid address")
         .connect()
         .await?;
+    info!(addr, "connected to hermes broker");
     Ok(channel)
 }
 

@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, trace, warn};
 
 use crate::slot::{Delivery, Slot, SlotMap, SubHandle};
 use crate::trie::{SlotId, TrieNode};
@@ -65,6 +66,8 @@ impl Router {
 
     /// Run the router loop. This never returns until all senders are dropped.
     pub async fn run(mut self) {
+        info!("router task started");
+
         // Scratch buffer reused across publishes — clear, don't realloc.
         let mut matched: Vec<SlotId> = Vec::with_capacity(64);
 
@@ -83,12 +86,21 @@ impl Router {
                     self.trie.lookup(&tokens, &mut matched);
 
                     if matched.is_empty() {
+                        trace!(subject = %subject, seq, "publish has no matching slots");
                         continue;
                     }
 
                     // Deduplicate (a subject can match the same slot via multiple trie paths).
                     matched.sort_unstable_by_key(|s| s.0);
                     matched.dedup();
+
+                    debug!(
+                        subject = %subject,
+                        seq,
+                        matched_slots = matched.len(),
+                        payload_bytes = payload.len(),
+                        "publishing message"
+                    );
 
                     let delivery = Delivery {
                         subject,
@@ -103,13 +115,17 @@ impl Router {
                                 let _ = sender.send(delivery.clone());
                             }
                             Some(Slot::QueueGroup { members, next }) => {
-                                if !members.is_empty() {
+                                if members.is_empty() {
+                                    warn!(slot_id = slot_id.0, "queue group has no members");
+                                } else {
                                     let idx = *next % members.len();
                                     let _ = members[idx].tx.try_send(delivery.clone());
                                     *next = next.wrapping_add(1);
                                 }
                             }
-                            None => {}
+                            None => {
+                                warn!(slot_id = slot_id.0, "matched slot not found in slot map");
+                            }
                         }
                     }
                 }
@@ -136,17 +152,44 @@ impl Router {
                         self.trie.insert(&tokens, slot_id);
                     }
 
+                    let sub_id = match &handle {
+                        SubHandle::Fanout { sub_id, .. }
+                        | SubHandle::QueueMember { sub_id, .. } => sub_id.0,
+                    };
+
+                    info!(
+                        subject = %subject,
+                        queue_group = queue_group.as_deref().unwrap_or("(none)"),
+                        sub_id,
+                        new_slot = new_slot_id.map(|s| s.0),
+                        "subscription created"
+                    );
+
                     let _ = reply.send(handle);
                 }
 
                 RouterCmd::Disconnect { sub_id } => {
                     let empty_slots = self.slots.remove_subscriber(sub_id);
-                    for (slot_id, _subject) in empty_slots {
-                        self.trie.remove(slot_id);
+
+                    info!(
+                        sub_id = sub_id.0,
+                        removed_slots = empty_slots.len(),
+                        "subscriber disconnected"
+                    );
+
+                    for (slot_id, subject) in &empty_slots {
+                        debug!(
+                            slot_id = slot_id.0,
+                            subject = %subject,
+                            "removing empty slot from trie"
+                        );
+                        self.trie.remove(*slot_id);
                     }
                 }
             }
         }
+
+        info!("router task stopped (all senders dropped)");
     }
 }
 

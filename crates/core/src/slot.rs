@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc};
+use tracing::{debug, trace};
 
 use crate::trie::SlotId;
 
@@ -106,6 +107,13 @@ impl SlotMap {
                     .entry(sub_id)
                     .or_default()
                     .push((slot_id, Box::from(subject)));
+                debug!(
+                    subject,
+                    slot_id = slot_id.0,
+                    sub_id = sub_id.0,
+                    sub_count = *sub_count,
+                    "joined existing fanout slot"
+                );
                 return (SubHandle::Fanout { sub_id, rx }, None);
             }
         }
@@ -125,6 +133,13 @@ impl SlotMap {
             .entry(sub_id)
             .or_default()
             .push((slot_id, Box::from(subject)));
+
+        debug!(
+            subject,
+            slot_id = slot_id.0,
+            sub_id = sub_id.0,
+            "created new fanout slot"
+        );
 
         (SubHandle::Fanout { sub_id, rx }, Some(slot_id))
     }
@@ -149,6 +164,14 @@ impl SlotMap {
                 .entry(sub_id)
                 .or_default()
                 .push((slot_id, Box::from(subject)));
+            debug!(
+                subject,
+                group,
+                slot_id = slot_id.0,
+                sub_id = sub_id.0,
+                member_count = members.len(),
+                "joined existing queue group"
+            );
             return (SubHandle::QueueMember { sub_id, rx }, None);
         }
 
@@ -167,6 +190,14 @@ impl SlotMap {
             .or_default()
             .push((slot_id, Box::from(subject)));
 
+        debug!(
+            subject,
+            group,
+            slot_id = slot_id.0,
+            sub_id = sub_id.0,
+            "created new queue group slot"
+        );
+
         (SubHandle::QueueMember { sub_id, rx }, Some(slot_id))
     }
 
@@ -176,6 +207,12 @@ impl SlotMap {
         let mut empty_slots = Vec::new();
 
         if let Some(entries) = self.sub_slots.remove(&sub_id) {
+            debug!(
+                sub_id = sub_id.0,
+                slot_count = entries.len(),
+                "removing subscriber from all slots"
+            );
+
             for (slot_id, subject) in entries {
                 let should_remove = match self.slots.get_mut(&slot_id) {
                     Some(Slot::Broadcast { sub_count, .. }) => {
@@ -188,6 +225,14 @@ impl SlotMap {
                     }
                     None => false,
                 };
+
+                trace!(
+                    sub_id = sub_id.0,
+                    slot_id = slot_id.0,
+                    subject = %subject,
+                    will_remove = should_remove,
+                    "processed slot removal"
+                );
 
                 if should_remove {
                     self.slots.remove(&slot_id);

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Once;
 use std::time::Duration;
 
 use hermes_broker::router::{Router, RouterConfig};
@@ -7,8 +8,24 @@ use hermes_proto::broker_server::BrokerServer;
 use tokio::net::TcpListener;
 use tonic::transport::{Channel, Server};
 
+static INIT_TRACING: Once = Once::new();
+
+fn init_test_tracing() {
+    INIT_TRACING.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
+            )
+            .with_test_writer()
+            .try_init()
+            .ok();
+    });
+}
+
 /// Start a broker on a random port, return the channel to connect to.
 async fn start_broker() -> Channel {
+    init_test_tracing();
     let listener = TcpListener::bind("[::1]:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
 

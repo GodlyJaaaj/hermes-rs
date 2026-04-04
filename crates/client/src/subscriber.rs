@@ -3,6 +3,7 @@ use hermes_proto::{Sub, SubscribeRequest, SubscribeResponse};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
+use tracing::{debug, info};
 
 /// A subscriber that receives messages from the broker over a gRPC stream.
 /// Drop the subscriber to unsubscribe (closing the stream triggers cleanup).
@@ -27,11 +28,14 @@ impl Subscriber {
         tokio::spawn(async move {
             while let Ok(Some(msg)) = resp_stream.message().await {
                 if delivery_tx.send(msg).await.is_err() {
+                    debug!("subscriber delivery channel closed");
                     break;
                 }
             }
+            debug!("subscriber stream ended");
         });
 
+        info!("subscriber created");
         Ok(Self {
             cmd_tx,
             delivery_rx,
@@ -44,9 +48,15 @@ impl Subscriber {
         subject: impl Into<String>,
         queue_group: Option<String>,
     ) -> Result<(), SubscribeError> {
+        let subject = subject.into();
+        info!(
+            subject = %subject,
+            queue_group = queue_group.as_deref().unwrap_or("(none)"),
+            "subscribing to subject"
+        );
         let req = SubscribeRequest {
             sub: Some(Sub {
-                subject: subject.into(),
+                subject,
                 queue_group: queue_group.unwrap_or_default(),
             }),
         };

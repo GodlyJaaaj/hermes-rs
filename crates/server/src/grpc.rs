@@ -8,6 +8,7 @@ use hermes_proto::{
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Streaming};
+use tracing::{debug, info, warn};
 
 pub struct BrokerService {
     router_tx: mpsc::Sender<RouterCmd>,
@@ -23,8 +24,6 @@ type GrpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, tonic::Status>> + Send>
 
 #[tonic::async_trait]
 impl Broker for BrokerService {
-    type SubscribeStream = GrpcStream<SubscribeResponse>;
-
     async fn publish(
         &self,
         request: Request<Streaming<PublishRequest>>,
@@ -36,7 +35,14 @@ impl Broker for BrokerService {
         while let Some(result) = inbound.next().await {
             let msg = match result {
                 Ok(m) => m,
-                Err(_) => break,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        published_so_far = count,
+                        "publish stream error"
+                    );
+                    break;
+                }
             };
 
             let cmd = RouterCmd::Publish {
@@ -50,16 +56,24 @@ impl Broker for BrokerService {
             };
 
             if router_tx.send(cmd).await.is_err() {
+                warn!(
+                    published_so_far = count,
+                    "router unavailable during publish"
+                );
                 return Err(tonic::Status::internal("router unavailable"));
             }
 
             count += 1;
         }
 
+        info!(total_published = count, "publish stream completed");
+
         Ok(Response::new(PublishAck {
             total_published: count,
         }))
     }
+
+    type SubscribeStream = GrpcStream<SubscribeResponse>;
 
     async fn subscribe(
         &self,
@@ -69,16 +83,27 @@ impl Broker for BrokerService {
         let router_tx = self.router_tx.clone();
         let (resp_tx, resp_rx) = mpsc::channel::<Result<SubscribeResponse, tonic::Status>>(256);
 
+        info!("new subscribe stream opened");
+
         tokio::spawn(async move {
             let mut active_subs: Vec<SubId> = Vec::new();
 
             while let Some(result) = inbound.next().await {
                 let msg = match result {
                     Ok(m) => m,
-                    Err(_) => break,
+                    Err(e) => {
+                        warn!(error = %e, "subscribe stream error");
+                        break;
+                    }
                 };
 
                 let Some(sub) = msg.sub else { continue };
+
+                debug!(
+                    subject = %sub.subject,
+                    queue_group = %sub.queue_group,
+                    "processing subscribe request"
+                );
 
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 let cmd = RouterCmd::Subscribe {
@@ -92,6 +117,7 @@ impl Broker for BrokerService {
                 };
 
                 if router_tx.send(cmd).await.is_err() {
+                    warn!("router unavailable during subscribe");
                     break;
                 }
 
@@ -118,13 +144,21 @@ impl Broker for BrokerService {
                                             }
                                         }
                                         Err(tokio::sync::broadcast::error::RecvError::Lagged(
-                                            _,
-                                        )) => continue,
+                                            n,
+                                        )) => {
+                                            warn!(
+                                                sub_id = sub_id.0,
+                                                skipped = n,
+                                                "fanout subscriber lagged, messages lost"
+                                            );
+                                            continue;
+                                        }
                                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                             break;
                                         }
                                     }
                                 }
+                                debug!(sub_id = sub_id.0, "fanout forwarding task ended");
                             });
                         }
                         SubHandle::QueueMember { mut rx, .. } => {
@@ -138,6 +172,7 @@ impl Broker for BrokerService {
                                         break;
                                     }
                                 }
+                                debug!(sub_id = sub_id.0, "queue member forwarding task ended");
                             });
                         }
                     }
@@ -145,6 +180,10 @@ impl Broker for BrokerService {
             }
 
             // Client disconnected — clean up all subscriptions.
+            info!(
+                active_subscriptions = active_subs.len(),
+                "subscribe stream closed, cleaning up"
+            );
             for sub_id in active_subs {
                 let _ = router_tx.send(RouterCmd::Disconnect { sub_id }).await;
             }

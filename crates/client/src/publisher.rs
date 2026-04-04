@@ -4,6 +4,7 @@ use hermes_proto::broker_client::BrokerClient;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
+use tracing::{debug, info, trace, warn};
 
 /// A fire-and-forget publisher. Messages are streamed to the broker with no per-message ack.
 pub struct Publisher {
@@ -18,9 +19,21 @@ impl Publisher {
 
         // Open the client-streaming RPC. The response (PublishAck) comes when we close.
         tokio::spawn(async move {
-            let _ = client.publish(ReceiverStream::new(rx)).await;
+            match client.publish(ReceiverStream::new(rx)).await {
+                Ok(resp) => {
+                    let ack = resp.into_inner();
+                    info!(
+                        total_published = ack.total_published,
+                        "publish stream completed"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "publish stream failed");
+                }
+            }
         });
 
+        debug!("publisher created");
         Ok(Self { tx })
     }
 
@@ -35,6 +48,8 @@ impl Publisher {
             payload: payload.into().to_vec(),
             reply_to: String::new(),
         };
+
+        trace!(subject = %req.subject, "queuing publish");
 
         self.tx
             .send(req)
