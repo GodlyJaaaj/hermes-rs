@@ -2,7 +2,7 @@ mod grpc;
 
 use hermes_broker::router::{Router, RouterConfig};
 use hermes_proto::broker_server::BrokerServer;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -44,7 +44,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(%addr, "hermes-broker listening");
 
-    Server::builder()
+    let mut builder = Server::builder();
+
+    let tls_cert = std::env::var("HERMES_TLS_CERT").ok();
+    let tls_key = std::env::var("HERMES_TLS_KEY").ok();
+    let tls_ca = std::env::var("HERMES_TLS_CA").ok();
+
+    if let (Some(cert_path), Some(key_path), Some(ca_path)) = (tls_cert, tls_key, tls_ca) {
+        let cert = tokio::fs::read(&cert_path).await?;
+        let key = tokio::fs::read(&key_path).await?;
+        let ca = tokio::fs::read(&ca_path).await?;
+
+        let tls_config = ServerTlsConfig::new()
+            .identity(Identity::from_pem(cert, key))
+            .client_ca_root(Certificate::from_pem(ca));
+
+        builder = builder.tls_config(tls_config)?;
+        info!("mTLS enabled");
+    } else {
+        info!("TLS not configured, serving plaintext");
+    }
+
+    builder
         .add_service(reflection)
         .add_service(BrokerServer::new(service))
         .serve(addr)

@@ -1,40 +1,69 @@
 use bytes::Bytes;
 use hermes_proto::PublishRequest;
 use hermes_proto::broker_client::BrokerClient;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{debug, info, trace, warn};
 
-/// A fire-and-forget publisher. Messages are streamed to the broker with no per-message ack.
+/// A fire-and-forget publisher with automatic reconnection.
+///
+/// Messages are streamed to the broker. If the stream breaks (broker restart,
+/// network hiccup), the publisher transparently reconnects and resumes.
 pub struct Publisher {
     tx: mpsc::Sender<PublishRequest>,
 }
 
 impl Publisher {
-    /// Create a new publisher connected to the broker.
-    pub async fn new(channel: Channel) -> Result<Self, tonic::Status> {
-        let mut client = BrokerClient::new(channel);
-        let (tx, rx) = mpsc::channel::<PublishRequest>(256);
+    /// Create a new publisher backed by the given gRPC channel.
+    ///
+    /// Spawns a background task that manages the publish stream and
+    /// reconnects automatically on failure.
+    pub fn new(channel: Channel) -> Self {
+        let (tx, mut rx) = mpsc::channel::<PublishRequest>(256);
 
-        // Open the client-streaming RPC. The response (PublishAck) comes when we close.
         tokio::spawn(async move {
-            match client.publish(ReceiverStream::new(rx)).await {
-                Ok(resp) => {
-                    let ack = resp.into_inner();
-                    info!(
-                        total_published = ack.total_published,
-                        "publish stream completed"
-                    );
+            loop {
+                let mut client = BrokerClient::new(channel.clone());
+                let (stream_tx, stream_rx) = mpsc::channel::<PublishRequest>(256);
+
+                let handle = tokio::spawn(async move {
+                    client.publish(ReceiverStream::new(stream_rx)).await
+                });
+
+                loop {
+                    match rx.recv().await {
+                        Some(msg) => {
+                            if stream_tx.send(msg).await.is_err() {
+                                warn!("publish stream broken, reconnecting...");
+                                break;
+                            }
+                        }
+                        None => {
+                            drop(stream_tx);
+                            let _ = handle.await;
+                            info!("publisher stopped");
+                            return;
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!(error = %e, "publish stream failed");
-                }
+
+                drop(stream_tx);
+                let _ = handle.await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                info!("reconnecting publish stream...");
             }
         });
 
         debug!("publisher created");
-        Ok(Self { tx })
+        Self { tx }
+    }
+
+    /// Create a no-op publisher that silently drops all messages (for tests).
+    pub fn noop() -> Self {
+        let (tx, _rx) = mpsc::channel::<PublishRequest>(1);
+        Self { tx }
     }
 
     /// Publish a message. Returns immediately after queuing (fire-and-forget).
@@ -43,10 +72,20 @@ impl Publisher {
         subject: impl Into<String>,
         payload: impl Into<Bytes>,
     ) -> Result<(), PublishError> {
+        self.publish_with_reply(subject, payload, "").await
+    }
+
+    /// Publish a message with a reply-to subject.
+    pub async fn publish_with_reply(
+        &self,
+        subject: impl Into<String>,
+        payload: impl Into<Bytes>,
+        reply_to: impl Into<String>,
+    ) -> Result<(), PublishError> {
         let req = PublishRequest {
             subject: subject.into(),
             payload: payload.into().to_vec(),
-            reply_to: String::new(),
+            reply_to: reply_to.into(),
         };
 
         trace!(subject = %req.subject, "queuing publish");
