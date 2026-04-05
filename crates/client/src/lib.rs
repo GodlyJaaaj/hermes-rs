@@ -21,7 +21,7 @@
 //! // let channel = connect("https://[::1]:50051", Some(tls)).await?;
 //!
 //! // Publish
-//! let publisher = Publisher::new(channel.clone()).await?;
+//! let publisher = Publisher::new(channel.clone());
 //! publisher.publish("orders.eu.created", &b"hello"[..]).await?;
 //!
 //! // Subscribe

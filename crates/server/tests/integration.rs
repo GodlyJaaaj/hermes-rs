@@ -62,7 +62,7 @@ async fn single_subscriber_exact_match() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let publisher = Publisher::new(channel).await.unwrap();
+    let publisher = Publisher::new(channel);
     publisher
         .publish("orders.eu.created", &b"payload1"[..])
         .await
@@ -87,7 +87,7 @@ async fn wildcard_star_match() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let publisher = Publisher::new(channel).await.unwrap();
+    let publisher = Publisher::new(channel);
     publisher
         .publish("orders.eu.created", &b"eu"[..])
         .await
@@ -117,7 +117,7 @@ async fn tail_match() {
     subscriber.subscribe("orders.>", None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let publisher = Publisher::new(channel).await.unwrap();
+    let publisher = Publisher::new(channel);
     publisher
         .publish("orders.eu.created", &b"deep"[..])
         .await
@@ -152,7 +152,7 @@ async fn fanout_multiple_subscribers() {
     sub3.subscribe("events.fanout", None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let publisher = Publisher::new(channel).await.unwrap();
+    let publisher = Publisher::new(channel);
     publisher
         .publish("events.fanout", &b"broadcast"[..])
         .await
@@ -182,7 +182,7 @@ async fn queue_group_round_robin() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let publisher = Publisher::new(channel).await.unwrap();
+    let publisher = Publisher::new(channel);
     for i in 0..4 {
         publisher
             .publish("jobs.process", format!("msg{i}").into_bytes())
@@ -220,7 +220,7 @@ async fn disconnect_cleans_up_subscriber() {
     sub2.subscribe("cleanup.test", None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let publisher = Publisher::new(channel).await.unwrap();
+    let publisher = Publisher::new(channel);
     publisher
         .publish("cleanup.test", &b"after-cleanup"[..])
         .await

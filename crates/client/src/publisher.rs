@@ -28,9 +28,10 @@ impl Publisher {
                 let mut client = BrokerClient::new(channel.clone());
                 let (stream_tx, stream_rx) = mpsc::channel::<PublishRequest>(256);
 
-                let handle = tokio::spawn(async move {
-                    client.publish(ReceiverStream::new(stream_rx)).await
-                });
+                let handle =
+                    tokio::spawn(
+                        async move { client.publish(ReceiverStream::new(stream_rx)).await },
+                    );
 
                 loop {
                     match rx.recv().await {
