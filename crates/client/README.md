@@ -8,7 +8,7 @@ gRPC client library for the [Hermes message broker](https://github.com/GodlyJaaa
 
 Hermes is a lightweight, high-performance message broker built in Rust. It uses trie-based subject routing with dot-separated topics (like `orders.eu.created`), supports broadcast fanout and load-balanced queue groups, and communicates over gRPC streaming.
 
-This crate provides the two main building blocks for interacting with a running broker: `Publisher` and `Subscriber`.
+This crate is a library that provides the two main building blocks for interacting with a running broker: `Publisher` and `Subscriber`. Add it as a dependency to your project and use it to publish and consume messages from any Rust application.
 
 ## Features
 

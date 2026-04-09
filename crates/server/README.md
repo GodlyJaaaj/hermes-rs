@@ -4,11 +4,11 @@
 [![docs.rs](https://img.shields.io/docsrs/hermes-broker-server)](https://docs.rs/hermes-broker-server)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/GodlyJaaaj/hermes-rs#license)
 
-gRPC server binary for the [Hermes message broker](https://github.com/GodlyJaaaj/hermes-rs).
+gRPC server for the [Hermes message broker](https://github.com/GodlyJaaaj/hermes-rs) — both a library and a ready-to-run binary.
 
-This crate provides the runnable broker process. It bridges incoming gRPC streams (publish and subscribe) to the core routing engine (`hermes-broker-core`) via an internal command channel. It also enables gRPC reflection so you can introspect the API with tools like `grpcurl`.
+This crate provides `BrokerService`, the gRPC service implementation that bridges incoming streams (publish and subscribe) to the core routing engine (`hermes-broker-core`). You can use it as a **library** to embed the broker in your own application, or run it directly as a **standalone binary**. It also enables gRPC reflection so you can introspect the API with tools like `grpcurl`.
 
-## Quick Start
+## Quick Start (Binary)
 
 ```bash
 # Install and run
@@ -20,6 +20,32 @@ cargo run -p hermes-broker-server
 ```
 
 The server listens on `[::1]:50051` by default.
+
+## Library Usage
+
+You can embed the broker's gRPC service in your own application. This is useful if you want to bundle the broker alongside other services, customize the transport layer, or integrate with your own lifecycle management:
+
+```rust
+use hermes_broker_core::router::{Router, RouterConfig};
+use hermes_broker_proto::broker_server::BrokerServer;
+use hermes_broker_server::grpc::BrokerService;
+use tonic::transport::Server;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (router, router_tx) = Router::new(RouterConfig::default(), 8192);
+    tokio::spawn(router.run());
+
+    let service = BrokerService::new(router_tx);
+
+    Server::builder()
+        .add_service(BrokerServer::new(service))
+        .serve("[::1]:50051".parse()?)
+        .await?;
+
+    Ok(())
+}
+```
 
 ## How It Works
 
