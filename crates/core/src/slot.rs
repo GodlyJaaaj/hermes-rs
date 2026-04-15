@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tracing::{debug, trace};
 
 use crate::trie::SlotId;
@@ -23,12 +23,6 @@ pub struct Delivery {
     pub reply_to: Option<Box<str>>,
 }
 
-/// A member of a queue group.
-pub struct QueueMember {
-    pub sub_id: SubId,
-    pub tx: mpsc::Sender<Delivery>,
-}
-
 /// A routing slot attached to trie nodes.
 pub enum Slot {
     /// Fanout: one send, all receivers get it.
@@ -37,10 +31,15 @@ pub enum Slot {
         /// Explicitly tracked subscriber count (don't rely on receiver_count()).
         sub_count: usize,
     },
-    /// Load-balanced: router picks one member round-robin.
+    /// Load-balanced: one shared MPMC channel, members compete to receive.
+    /// Whichever member task is idle first takes the delivery — natural
+    /// work-stealing, no cursor bookkeeping, no head-of-line blocking.
     QueueGroup {
-        members: Vec<QueueMember>,
-        next: usize,
+        tx: kanal::AsyncSender<Delivery>,
+        /// Template receiver kept so new subscribers can clone their own handle.
+        rx: kanal::AsyncReceiver<Delivery>,
+        /// Member SubIds, only used for disconnect bookkeeping.
+        member_ids: Vec<SubId>,
     },
 }
 
@@ -53,12 +52,14 @@ pub enum SubHandle {
         /// Broadcast receiver for incoming deliveries.
         rx: broadcast::Receiver<Delivery>,
     },
-    /// Queue group member — receives messages round-robin with other members.
+    /// Queue group member — shares a kanal MPMC receiver with its peers.
+    /// Each delivery is taken by exactly one member; idle members pick up
+    /// work first, so slow peers don't hold up the group.
     QueueMember {
         /// Unique subscriber identifier.
         sub_id: SubId,
-        /// mpsc receiver for incoming deliveries.
-        rx: mpsc::Receiver<Delivery>,
+        /// Kanal async receiver cloned from the group's shared channel.
+        rx: kanal::AsyncReceiver<Delivery>,
     },
 }
 
@@ -168,12 +169,14 @@ impl SlotMap {
     ) -> (SubHandle, Option<SlotId>) {
         let key = (Box::from(subject), Box::from(group));
         let sub_id = self.alloc_sub_id();
-        let (tx, rx) = mpsc::channel(channel_capacity);
 
         if let Some(&slot_id) = self.index.get(&key)
-            && let Some(Slot::QueueGroup { members, .. }) = self.slots.get_mut(&slot_id)
+            && let Some(Slot::QueueGroup {
+                rx, member_ids, ..
+            }) = self.slots.get_mut(&slot_id)
         {
-            members.push(QueueMember { sub_id, tx });
+            let member_rx = rx.clone();
+            member_ids.push(sub_id);
             self.sub_slots
                 .entry(sub_id)
                 .or_default()
@@ -183,19 +186,28 @@ impl SlotMap {
                 group,
                 slot_id = slot_id.0,
                 sub_id = sub_id.0,
-                member_count = members.len(),
+                member_count = member_ids.len(),
                 "joined existing queue group"
             );
-            return (SubHandle::QueueMember { sub_id, rx }, None);
+            return (
+                SubHandle::QueueMember {
+                    sub_id,
+                    rx: member_rx,
+                },
+                None,
+            );
         }
 
-        // New queue group slot.
+        // New queue group slot — one shared MPMC channel for all members.
         let slot_id = self.alloc_slot_id();
+        let (tx, rx) = kanal::bounded_async::<Delivery>(channel_capacity);
+        let member_rx = rx.clone();
         self.slots.insert(
             slot_id,
             Slot::QueueGroup {
-                members: vec![QueueMember { sub_id, tx }],
-                next: 0,
+                tx,
+                rx,
+                member_ids: vec![sub_id],
             },
         );
         self.index.insert(key, slot_id);
@@ -212,7 +224,13 @@ impl SlotMap {
             "created new queue group slot"
         );
 
-        (SubHandle::QueueMember { sub_id, rx }, Some(slot_id))
+        (
+            SubHandle::QueueMember {
+                sub_id,
+                rx: member_rx,
+            },
+            Some(slot_id),
+        )
     }
 
     /// Remove a subscriber from all its slots. Returns slot IDs that became empty
@@ -233,9 +251,9 @@ impl SlotMap {
                         *sub_count = sub_count.saturating_sub(1);
                         *sub_count == 0
                     }
-                    Some(Slot::QueueGroup { members, .. }) => {
-                        members.retain(|m| m.sub_id != sub_id);
-                        members.is_empty()
+                    Some(Slot::QueueGroup { member_ids, .. }) => {
+                        member_ids.retain(|id| *id != sub_id);
+                        member_ids.is_empty()
                     }
                     None => false,
                 };

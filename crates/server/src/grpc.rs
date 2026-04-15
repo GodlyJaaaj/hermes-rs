@@ -165,9 +165,9 @@ impl Broker for BrokerService {
                                 debug!(sub_id = sub_id.0, "fanout forwarding task ended");
                             });
                         }
-                        SubHandle::QueueMember { mut rx, .. } => {
+                        SubHandle::QueueMember { rx, .. } => {
                             tokio::spawn(async move {
-                                while let Some(delivery) = rx.recv().await {
+                                while let Ok(delivery) = rx.recv().await {
                                     if resp_tx
                                         .send(Ok(delivery_to_response(delivery)))
                                         .await

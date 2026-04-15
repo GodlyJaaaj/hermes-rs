@@ -114,13 +114,17 @@ impl Router {
                             Some(Slot::Broadcast { sender, .. }) => {
                                 let _ = sender.send(delivery.clone());
                             }
-                            Some(Slot::QueueGroup { members, next }) => {
-                                if members.is_empty() {
+                            Some(Slot::QueueGroup {
+                                tx, member_ids, ..
+                            }) => {
+                                if member_ids.is_empty() {
                                     warn!(slot_id = slot_id.0, "queue group has no members");
                                 } else {
-                                    let idx = *next % members.len();
-                                    let _ = members[idx].tx.try_send(delivery.clone());
-                                    *next = next.wrapping_add(1);
+                                    // Await until a member reads. The bounded channel
+                                    // applies backpressure to publishers instead of
+                                    // silently dropping — filling shouldn't happen in
+                                    // practice, but we'd rather block than lose data.
+                                    let _ = tx.send(delivery.clone()).await;
                                 }
                             }
                             None => {
@@ -252,29 +256,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queue_group_round_robin() {
+    async fn queue_group_exactly_once_delivery() {
+        // With kanal MPMC dispatch, ordering between members is not guaranteed
+        // (whichever member task is idle first takes the message). The invariant
+        // is: every published message is delivered to exactly one member.
         let tx = setup().await;
 
         let handle1 = subscribe(&tx, "jobs.process", Some("workers")).await;
         let handle2 = subscribe(&tx, "jobs.process", Some("workers")).await;
 
-        for i in 0..4 {
+        const N: usize = 20;
+        for i in 0..N {
             publish(&tx, "jobs.process", format!("msg{i}").as_bytes()).await;
         }
 
-        match (handle1, handle2) {
-            (SubHandle::QueueMember { mut rx, .. }, SubHandle::QueueMember { rx: mut rx2, .. }) => {
-                let m0a = rx.recv().await.unwrap();
-                let m1a = rx2.recv().await.unwrap();
-                let m0b = rx.recv().await.unwrap();
-                let m1b = rx2.recv().await.unwrap();
-                assert_eq!(m0a.payload.as_ref(), b"msg0");
-                assert_eq!(m1a.payload.as_ref(), b"msg1");
-                assert_eq!(m0b.payload.as_ref(), b"msg2");
-                assert_eq!(m1b.payload.as_ref(), b"msg3");
-            }
+        let (rx1, rx2) = match (handle1, handle2) {
+            (
+                SubHandle::QueueMember { rx: rx1, .. },
+                SubHandle::QueueMember { rx: rx2, .. },
+            ) => (rx1, rx2),
             _ => panic!("Expected queue member handles"),
-        }
+        };
+
+        let collect = |rx: kanal::AsyncReceiver<Delivery>| async move {
+            let mut seen = Vec::new();
+            while let Ok(d) = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                rx.recv(),
+            )
+            .await
+            {
+                match d {
+                    Ok(delivery) => seen.push(
+                        String::from_utf8(delivery.payload.to_vec()).unwrap(),
+                    ),
+                    Err(_) => break,
+                }
+            }
+            seen
+        };
+
+        let (got1, got2) = tokio::join!(collect(rx1), collect(rx2));
+
+        let mut all: Vec<String> = got1.iter().chain(got2.iter()).cloned().collect();
+        all.sort();
+        let mut expected: Vec<String> = (0..N).map(|i| format!("msg{i}")).collect();
+        expected.sort();
+        assert_eq!(all, expected, "every message delivered exactly once");
+        assert!(!got1.is_empty() && !got2.is_empty(), "both members saw work");
     }
 
     #[tokio::test]
@@ -291,6 +320,97 @@ mod tests {
             }
             _ => panic!("Expected fanout handle"),
         }
+    }
+
+    #[tokio::test]
+    async fn idle_queue_member_does_not_block_other_subjects() {
+        // A queue group subscriber that never reads must not stall the router.
+        // We publish one message to the slow group (fits in the buffer, no
+        // blocking), then publish to an unrelated subject and assert the fast
+        // subscriber receives it well within the router's single-task budget.
+        let tx = setup().await;
+
+        // Slow queue group member — we subscribe but never drain its receiver.
+        let slow_handle = subscribe(&tx, "slow.work", Some("workers")).await;
+        let _slow_rx = match slow_handle {
+            SubHandle::QueueMember { rx, .. } => rx,
+            _ => panic!("expected queue member"),
+        };
+
+        // Fast fanout subscriber on a completely different subject.
+        let fast_handle = subscribe(&tx, "fast.events", None).await;
+        let mut fast_rx = match fast_handle {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Park a message on the slow queue (buffered, router does not wait).
+        publish(&tx, "slow.work", b"stuck").await;
+
+        // Publish to the fast subject and verify it arrives promptly.
+        publish(&tx, "fast.events", b"go").await;
+
+        let delivery = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            fast_rx.recv(),
+        )
+        .await
+        .expect("router blocked: fast subject did not deliver in time")
+        .expect("fast receiver closed");
+        assert_eq!(delivery.payload.as_ref(), b"go");
+    }
+
+    #[tokio::test]
+    async fn full_queue_channel_blocks_router() {
+        // Dual of the previous test: prove that a queue group whose buffer is
+        // *full* and whose only member never reads will stall the entire
+        // single-task router. This is the known backpressure tradeoff — better
+        // than silently dropping, but worth locking in with a regression test.
+        let config = RouterConfig {
+            broadcast_capacity: 16,
+            queue_channel_capacity: 2, // tiny so we fill it in two publishes
+        };
+        let (router, tx) = Router::new(config, 1024);
+        tokio::spawn(router.run());
+
+        // Slow queue member — we hold the receiver but never call recv().
+        let slow_handle = subscribe(&tx, "slow.work", Some("workers")).await;
+        let _slow_rx = match slow_handle {
+            SubHandle::QueueMember { rx, .. } => rx,
+            _ => panic!("expected queue member"),
+        };
+
+        // Fast subscriber on an unrelated subject — should normally receive
+        // promptly, but won't here because the router is stuck.
+        let fast_handle = subscribe(&tx, "fast.events", None).await;
+        let mut fast_rx = match fast_handle {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Fill the shared kanal buffer (capacity 2): these two fit, router
+        // does not block yet.
+        publish(&tx, "slow.work", b"1").await;
+        publish(&tx, "slow.work", b"2").await;
+
+        // Third publish: router calls tx.send(..).await on a full channel,
+        // so it parks waiting for a consumer that will never come.
+        publish(&tx, "slow.work", b"3").await;
+
+        // While the router is stuck, queue a publish on another subject.
+        // It lands in the router's own mpsc but won't be processed.
+        publish(&tx, "fast.events", b"go").await;
+
+        // Assert the fast message never arrives — router is blocked.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            fast_rx.recv(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected router to be blocked by full queue channel, but fast.events delivered: {result:?}"
+        );
     }
 
     #[tokio::test]
