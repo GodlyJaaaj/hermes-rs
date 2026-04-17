@@ -1,53 +1,17 @@
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hermes_broker::router::RouterCmd;
-use hermes_broker::slot::{Delivery, SessionId, SubHandle, SubId};
+use hermes_broker::slot::{Delivery, SessionId};
 use hermes_proto::{
     PublishAck, PublishRequest, SubscribeRequest, SubscribeResponse, broker_server::Broker,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Streaming};
 use tracing::{debug, info, warn};
 
-/// Delivery receiver abstracted over fanout (broadcast) and queue-group (kanal MPMC).
-/// Centralizes the slight divergence between `tokio::broadcast::Receiver` (has a
-/// `Lagged` variant on overflow) and `kanal::AsyncReceiver` (closed = error).
-enum DeliveryRx {
-    Fanout(broadcast::Receiver<Arc<Delivery>>),
-    Queue(kanal::AsyncReceiver<Arc<Delivery>>),
-}
-
-enum RxOutcome {
-    Got(Arc<Delivery>),
-    Lagged(u64),
-    Closed,
-}
-
-impl DeliveryRx {
-    async fn recv(&mut self) -> RxOutcome {
-        match self {
-            DeliveryRx::Fanout(rx) => match rx.recv().await {
-                Ok(d) => RxOutcome::Got(d),
-                Err(broadcast::error::RecvError::Lagged(n)) => RxOutcome::Lagged(n),
-                Err(broadcast::error::RecvError::Closed) => RxOutcome::Closed,
-            },
-            DeliveryRx::Queue(rx) => match rx.recv().await {
-                Ok(d) => RxOutcome::Got(d),
-                Err(_) => RxOutcome::Closed,
-            },
-        }
-    }
-}
-
-fn split_handle(handle: SubHandle) -> (SubId, DeliveryRx) {
-    match handle {
-        SubHandle::Fanout { sub_id, rx } => (sub_id, DeliveryRx::Fanout(rx)),
-        SubHandle::QueueMember { sub_id, rx } => (sub_id, DeliveryRx::Queue(rx)),
-    }
-}
+use crate::delivery_rx::{RxOutcome, split_handle};
 
 /// gRPC implementation of the Hermes [`Broker`] service.
 ///
