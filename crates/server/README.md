@@ -65,6 +65,8 @@ Client ◄──── gRPC (tonic) ────► BrokerService ──── m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `HERMES_ADDR` | `[::1]:50051` | Bind address for the gRPC listener |
+| `HERMES_ROUTER_CAPACITY` | `8192` | Capacity of the router command mpsc channel (publish/subscribe backpressure threshold) |
 | `RUST_LOG` | `info` | Log level filter ([tracing directives](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)) |
 | `HERMES_LOG_FORMAT` | `text` | Set to `json` for structured JSON output (useful for containers and log aggregation) |
 | `HERMES_TLS_CERT` | — | Path to PEM-encoded server certificate (enables mTLS when all three TLS vars are set) |

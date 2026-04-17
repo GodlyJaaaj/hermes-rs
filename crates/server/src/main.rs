@@ -24,16 +24,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(fmt_layer)
         .init();
 
-    let addr = "[::1]:50051".parse()?;
+    let addr_str =
+        std::env::var("HERMES_ADDR").unwrap_or_else(|_| "[::1]:50051".to_string());
+    let addr = addr_str.parse()?;
+
+    let router_capacity: usize = std::env::var("HERMES_ROUTER_CAPACITY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8192);
 
     let config = RouterConfig::default();
     info!(
+        addr = %addr_str,
+        router_capacity,
         broadcast_capacity = config.broadcast_capacity,
         queue_channel_capacity = config.queue_channel_capacity,
         "router configuration loaded"
     );
 
-    let (router, router_tx) = Router::new(config, 8192);
+    let (router, router_tx) = Router::new(config, router_capacity);
     tokio::spawn(router.run());
 
     let service = grpc::BrokerService::new(router_tx);
