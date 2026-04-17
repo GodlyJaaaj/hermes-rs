@@ -1,13 +1,19 @@
+mod cli;
 mod grpc;
 
+use clap::Parser;
 use hermes_broker::router::{Router, RouterConfig};
 use hermes_proto::broker_server::BrokerServer;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+use cli::Args;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     // Initialize tracing subscriber.
     // Respects RUST_LOG env var; defaults to "info" if unset.
     // Set HERMES_LOG_FORMAT=json for JSON output (e.g. in containers).
@@ -24,18 +30,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(fmt_layer)
         .init();
 
-    let addr_str =
-        std::env::var("HERMES_ADDR").unwrap_or_else(|_| "[::1]:50051".to_string());
-    let addr = addr_str.parse()?;
-
-    let router_capacity: usize = std::env::var("HERMES_ROUTER_CAPACITY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8192);
+    let addr = args.addr.parse()?;
+    let router_capacity = args.router_capacity;
 
     let config = RouterConfig::default();
     info!(
-        addr = %addr_str,
+        addr = %args.addr,
         router_capacity,
         broadcast_capacity = config.broadcast_capacity,
         queue_channel_capacity = config.queue_channel_capacity,

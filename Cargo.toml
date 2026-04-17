@@ -41,5 +41,8 @@ thiserror = "2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# ── CLI ──
+clap = { version = "4", features = ["derive", "env"] }
+
 # ── Bench / test ──
 criterion = { version = "0.8", features = ["async_tokio"] }
