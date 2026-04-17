@@ -1,42 +1,10 @@
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use rustc_hash::FxHashMap;
 use tokio::sync::broadcast;
 use tracing::{debug, trace};
-
-/// Identity hasher for `u64`-keyed maps with internally-generated,
-/// non-adversarial keys (`SlotId`, `SubId`). Skips the default SipHash
-/// mixing entirely — just returns the key bytes as the hash. Safe here
-/// because keys are monotonic u64s allocated by the router itself.
-///
-/// INVARIANT: only valid for single-field `u64` newtype keys. `write_u64`
-/// overwrites rather than mixes, so composite keys (multiple `write_*`
-/// calls per hash) would silently lose all but the last field. Do not
-/// use this hasher with types whose `Hash` impl writes more than one u64.
-#[derive(Default)]
-struct IdentityU64Hasher(u64);
-
-impl Hasher for IdentityU64Hasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        // Fallback for any non-u64 derive path; pack what we can.
-        for &b in bytes {
-            self.0 = self.0.rotate_left(8) ^ u64::from(b);
-        }
-    }
-    #[inline]
-    fn write_u64(&mut self, n: u64) {
-        self.0 = n;
-    }
-}
-
-type U64Map<K, V> = HashMap<K, V, BuildHasherDefault<IdentityU64Hasher>>;
 
 use crate::trie::SlotId;
 
@@ -117,16 +85,16 @@ pub enum SubHandle {
 #[derive(Default)]
 pub struct SlotMap {
     /// Hot path: looked up per publish. Uses identity hash on `SlotId(u64)`.
-    slots: U64Map<SlotId, Slot>,
+    slots: FxHashMap<SlotId, Slot>,
     /// `(subject, Option<queue_group>) → SlotId`. Cold path — only touched on
     /// subscribe/unsubscribe, so default string hash is fine.
     index: HashMap<IndexKey, SlotId>,
     /// Reverse of `index`: `SlotId → IndexKey`. Lets `remove_subscriber` drop
     /// the index entry in O(1) instead of a full `index.retain` scan.
-    slot_keys: U64Map<SlotId, IndexKey>,
+    slot_keys: FxHashMap<SlotId, IndexKey>,
     /// `SubId → list of (SlotId, subject)` for cleanup on disconnect.
     /// Cold path, identity hash gives a small win for the disconnect sweep.
-    sub_slots: U64Map<SubId, Vec<(SlotId, Box<str>)>>,
+    sub_slots: FxHashMap<SubId, Vec<(SlotId, Box<str>)>>,
     next_slot_id: u64,
     next_sub_id: u64,
 }
