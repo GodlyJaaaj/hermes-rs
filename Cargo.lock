@@ -478,6 +478,7 @@ dependencies = [
  "hermes-broker-client",
  "hermes-broker-core",
  "hermes-broker-proto",
+ "kanal",
  "tokio",
  "tokio-stream",
  "tonic",
