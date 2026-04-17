@@ -77,10 +77,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder
         .add_service(reflection)
         .add_service(BrokerServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
     info!("hermes-broker shutting down");
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => info!("received shutdown signal (Ctrl+C)"),
+        Err(e) => tracing::error!(error = %e, "failed to install Ctrl+C handler"),
+    }
 }
