@@ -75,6 +75,7 @@ async fn main() {
     tx.send(RouterCmd::Subscribe {
         subject: Box::from("orders.>"),
         queue_group: None,
+        session_id: hermes_broker_core::slot::SessionId(1),
         reply: reply_tx,
     }).await.unwrap();
 
@@ -108,20 +109,21 @@ async fn main() {
 
 ## Router Commands
 
-The router accepts three commands via its `mpsc` channel:
+The router accepts four commands via its `mpsc` channel:
 
 | Command | Description |
 |---------|-------------|
 | `Publish { subject, payload, reply_to }` | Route a message to all matching subscribers. Fire-and-forget — no response. |
-| `Subscribe { subject, queue_group, reply }` | Register a subscription. Returns a `SubHandle` via oneshot for receiving deliveries. |
-| `Disconnect { sub_id }` | Remove a subscriber from all its slots. Cleans up empty slots from the trie. |
+| `Subscribe { subject, queue_group, session_id, reply }` | Register a subscription under `session_id`. Returns a `SubHandle` via oneshot for receiving deliveries. |
+| `Disconnect { sub_id }` | Remove a single subscriber from all its slots. Cleans up empty slots from the trie. |
+| `SessionEnd { session_id }` | Remove every subscriber registered under `session_id` in one shot. Typically called when a gRPC subscribe stream closes. |
 
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `broadcast_capacity` | 4096 | Buffer size for broadcast channels (fanout slots). Lagged receivers skip messages. |
-| `queue_channel_capacity` | 256 | Buffer size per queue group member (mpsc channel). Back-pressure applies when full. |
+| `queue_channel_capacity` | 256 | Buffer size of the shared kanal MPMC channel per queue group. Router back-pressures when full. |
 
 ## Benchmarks
 
