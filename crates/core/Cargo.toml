@@ -12,6 +12,7 @@ bytes.workspace = true
 smallvec.workspace = true
 tracing.workspace = true
 kanal.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -205,12 +205,12 @@ fn bench_fanout_publish_only(c: &mut Criterion) {
                                                 return;
                                             }
                                         }
-                                        Err(
-                                            tokio::sync::broadcast::error::RecvError::Lagged(_),
-                                        ) => continue,
-                                        Err(
-                                            tokio::sync::broadcast::error::RecvError::Closed,
-                                        ) => return,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                                            _,
+                                        )) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            return;
+                                        }
                                     }
                                 }
                             });

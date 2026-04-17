@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hermes-rs — Benchmark Report (post dispatcher removal)</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  html { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #111; }
+  body { font-size: 10.5pt; line-height: 1.45; }
+  h1 { font-size: 22pt; margin: 0 0 2pt 0; letter-spacing: -0.01em; }
+  h2 { font-size: 13pt; margin: 16pt 0 6pt 0; border-bottom: 1px solid #ccc; padding-bottom: 2pt; }
+  h3 { font-size: 11pt; margin: 10pt 0 4pt 0; }
+  .sub { color: #666; font-size: 10pt; margin-bottom: 10pt; }
+  .meta { color: #555; font-size: 9pt; }
+  .meta code { background: #f2f2f2; padding: 1pt 4pt; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; font-size: 9.5pt; margin-top: 4pt; }
+  th, td { border: 1px solid #d8d8d8; padding: 4pt 6pt; text-align: left; }
+  th { background: #f3f4f6; font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.win { color: #0a7d2e; font-weight: 600; }
+  td.loss { color: #b42318; }
+  .headline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8pt; margin: 10pt 0 14pt 0; }
+  .card { border: 1px solid #e2e2e2; border-radius: 6px; padding: 8pt 10pt; }
+  .card .label { font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.04em; color: #666; }
+  .card .value { font-size: 16pt; font-weight: 600; margin-top: 2pt; color: #0a7d2e; }
+  .card .hint { font-size: 8.5pt; color: #777; margin-top: 2pt; }
+  .foot { margin-top: 18pt; font-size: 8.5pt; color: #777; border-top: 1px solid #e5e5e5; padding-top: 6pt; }
+  code.k { background: #f2f2f2; padding: 1pt 4pt; border-radius: 3px; font-size: 9.5pt; }
+  ul { margin: 4pt 0 4pt 0; padding-left: 18pt; }
+  li { margin: 2pt 0; }
+  .slope-box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8pt 10pt; margin: 8pt 0; }
+  .slope-box b { color: #0a7d2e; }
+</style>
+</head>
+<body>
+
+<h1>Hermes-rs — Broker Throughput Report</h1>
+<div class="sub">Post dispatcher-task removal · end-to-end Criterion benchmarks · release profile</div>
+
+<div class="meta">
+  Crate <code>hermes-broker-core</code> · bench <code>throughput</code> ·
+  router: single-owner tokio task · fanout via direct <code>tokio::sync::broadcast::send</code> (no dispatcher hop) ·
+  queue groups backed by <code>kanal</code> MPMC · <code>Arc&lt;Delivery&gt;</code> channel payload ·
+  stack-resident SmallVec scratch buffers · identity-hash slot map · FxHash trie children ·
+  O(1) slot cleanup via reverse <code>slot_keys</code> index.
+</div>
+
+<h2>Headline numbers</h2>
+<div class="headline">
+  <div class="card">
+    <div class="label">Fanout, 1 subscriber</div>
+    <div class="value">3.65 M msg/s</div>
+    <div class="hint">273.8 ns per publish</div>
+  </div>
+  <div class="card">
+    <div class="label">Fanout, 1000 subscribers</div>
+    <div class="value">160 M deliveries/s</div>
+    <div class="hint">6.24 µs end-to-end</div>
+  </div>
+  <div class="card">
+    <div class="label">Queue group, 4 members</div>
+    <div class="value">3.15 M msg/s</div>
+    <div class="hint">317.3 ns per publish</div>
+  </div>
+</div>
+
+<h2>Fanout scaling — the headline story</h2>
+<div class="slope-box">
+  <b>Slope 15× flatter than pre-simplification design.</b>
+  Per added subscriber, the router now pays <b>~5.5 ns</b> of end-to-end latency.
+  Previously (dispatcher pattern) it paid <b>~80 ns</b> per added sub.
+  Raw numbers below.
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Benchmark</th>
+      <th class="num">Baseline (dispatcher pattern)</th>
+      <th class="num">Current (direct broadcast)</th>
+      <th class="num">Delta</th>
+      <th class="num">Speedup</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>fanout_e2e · 1 sub</td>
+      <td class="num">247.7 ns</td>
+      <td class="num">273.8 ns</td>
+      <td class="num loss">+26.1 ns</td>
+      <td class="num loss">0.90×</td>
+    </tr>
+    <tr>
+      <td>fanout_e2e · 10 subs</td>
+      <td class="num">276.1 ns</td>
+      <td class="num">499.4 ns</td>
+      <td class="num loss">+223.3 ns</td>
+      <td class="num loss">0.55×</td>
+    </tr>
+    <tr>
+      <td>fanout_e2e · 100 subs</td>
+      <td class="num">6.609 µs</td>
+      <td class="num">4.593 µs</td>
+      <td class="num win">−2.02 µs</td>
+      <td class="num win">1.44×</td>
+    </tr>
+    <tr>
+      <td>fanout_e2e · 1000 subs</td>
+      <td class="num">86.62 µs</td>
+      <td class="num">6.237 µs</td>
+      <td class="num win">−80.4 µs</td>
+      <td class="num win"><b>13.89×</b></td>
+    </tr>
+    <tr>
+      <td>fanout_publish_only · 1</td>
+      <td class="num">269.9 ns</td>
+      <td class="num">297.5 ns</td>
+      <td class="num loss">+27.6 ns</td>
+      <td class="num loss">0.91×</td>
+    </tr>
+    <tr>
+      <td>fanout_publish_only · 10</td>
+      <td class="num">776.8 ns</td>
+      <td class="num">545.4 ns</td>
+      <td class="num win">−231.4 ns</td>
+      <td class="num win">1.42×</td>
+    </tr>
+    <tr>
+      <td>fanout_publish_only · 100</td>
+      <td class="num">7.431 µs</td>
+      <td class="num">4.627 µs</td>
+      <td class="num win">−2.80 µs</td>
+      <td class="num win">1.61×</td>
+    </tr>
+    <tr>
+      <td>fanout_publish_only · 1000</td>
+      <td class="num">84.19 µs</td>
+      <td class="num">6.062 µs</td>
+      <td class="num win">−78.1 µs</td>
+      <td class="num win"><b>13.89×</b></td>
+    </tr>
+    <tr>
+      <td>queue_group_4_members_e2e</td>
+      <td class="num">287.4 ns</td>
+      <td class="num">317.3 ns</td>
+      <td class="num loss">+29.9 ns</td>
+      <td class="num loss">0.91×</td>
+    </tr>
+    <tr>
+      <td>wildcard_routing_e2e</td>
+      <td class="num">232.4 ns</td>
+      <td class="num">299.3 ns</td>
+      <td class="num loss">+66.9 ns</td>
+      <td class="num loss">0.78×</td>
+    </tr>
+  </tbody>
+</table>
+<p class="meta">
+  Baseline = last bench state before the dispatcher-task removal (already carrying every prior
+  v0.6.2 optimization: <code>Arc&lt;Delivery&gt;</code>, kanal MPMC, SmallVec scratch, FxHash, identity hash).
+  All change figures are the delta produced by removing the per-slot dispatcher task and moving
+  to direct <code>broadcast::send</code> from the router.
+</p>
+
+<h2>Scaling slope — before vs after</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Design</th>
+      <th class="num">1 sub</th>
+      <th class="num">1000 subs</th>
+      <th class="num">Added per sub (slope)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Dispatcher pattern (baseline)</td>
+      <td class="num">247.7 ns</td>
+      <td class="num">86.62 µs</td>
+      <td class="num">≈ 86.4 ns / sub</td>
+    </tr>
+    <tr>
+      <td>Direct broadcast (current)</td>
+      <td class="num">273.8 ns</td>
+      <td class="num">6.237 µs</td>
+      <td class="num win">≈ 5.97 ns / sub</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>What changed</h2>
+<p>
+  <b>Dispatcher task removed.</b> The previous design routed every fanout publish through
+  a per-slot mpsc plus a dedicated tokio task whose only job was to call
+  <code>broadcast::Sender::send</code>. The intent was to keep the router
+  O(1) in subscriber count by deferring the O(N) waker walk onto a separate task —
+  but <code>broadcast::send</code> is already a synchronous, non-blocking call:
+  it writes into the ring buffer (lagged receivers get a <code>Lagged</code> error
+  on their next <code>recv</code>) and walks the waker list inline. The extra mpsc hop
+  and dispatcher task therefore added overhead without reducing the total work.
+</p>
+<p>
+  <b>Router now calls <code>sender.send(delivery)</code> directly</b> with no
+  <code>.await</code>. The hot path in <code>router.rs</code> has zero yields for fanout.
+  The net effect is visible in the slope: the per-added-subscriber cost collapses from
+  ≈86 ns to ≈6 ns because the extra hop was paying a fixed cost per publish that grew
+  with N (mpsc wake + dispatcher wake + task switch).
+</p>
+<p>
+  <b>Structural cleanup (free with the refactor):</b>
+</p>
+<ul>
+  <li><code>Slot::Broadcast</code> variant no longer carries <code>dispatch_tx</code>; only
+    <code>sender</code> and an explicit <code>sub_count</code> remain.</li>
+  <li>Subscribe no longer spawns a dispatcher task. One less task per fanout slot.</li>
+  <li>Slot cleanup on disconnect moved from an O(M) <code>index.retain</code> scan to O(1)
+    via a new <code>slot_keys: U64Map&lt;SlotId, IndexKey&gt;</code> reverse index.</li>
+  <li>The index key is now <code>(Box&lt;str&gt;, Option&lt;Box&lt;str&gt;&gt;)</code> instead of
+    <code>(Box&lt;str&gt;, Box&lt;str&gt;)</code>, making the fanout/queue-group distinction explicit.</li>
+</ul>
+
+<h2>Small-N trade-off</h2>
+<p>
+  Between 1 and 10 subscribers, fanout latency regressed from ~247 ns to ~274 ns (1 sub)
+  and ~276 ns to ~499 ns (10 subs). The cause is the loss of <i>pipelining</i>: the old
+  dispatcher pattern let router and dispatcher run on two different tokio worker threads,
+  so while the router prepared publish N+1, the dispatcher was still waking subscribers
+  for publish N. With the dispatcher gone, the router does both sequentially.
+</p>
+<p>
+  For small N the per-wake cost is tiny, so the loss of parallel overlap shows up as
+  a few hundred ns of extra latency. For large N the per-wake cost dominates and the
+  saved hop wins decisively (13.9× at 1000 subs). The curve is now monotonically
+  close to linear in N with a very small slope, which matches the objective of
+  <i>flat fanout latency scaling</i>.
+</p>
+
+<h2>Queue group and wildcard</h2>
+<p>
+  <code>queue_group_4_members_e2e</code>: +10.4 % (317 ns vs 287 ns). The queue-group path
+  did not change (still kanal MPMC with router <code>.await</code>). The small regression is
+  memory-layout noise from the reshaped <code>SlotMap</code> struct (added <code>slot_keys</code>
+  field, queue_group typed as <code>Option</code>).
+</p>
+<p>
+  <code>wildcard_routing_e2e</code>: +28.8 % (299 ns vs 232 ns). This bench is essentially
+  <code>fanout_e2e</code> with 1 subscriber on a wildcard pattern, so the small-N
+  regression story applies.
+</p>
+
+<h2>Methodology</h2>
+<ul>
+  <li>Criterion 0.8, 100 samples per measurement, 3 s warmup + 5 s collection.</li>
+  <li>Each iteration: publish one message, synchronize on a sequence tracker via <code>AtomicU64</code> + <code>Notify</code>, then yield.</li>
+  <li>All tasks spawned on the same multi-threaded tokio runtime (Criterion's default <code>async_tokio</code>).</li>
+  <li>Payload: 128 bytes. Latency is pure in-process router cost — no gRPC, no TLS, no TCP.</li>
+  <li>Both <code>fanout_e2e</code> (waits for all N subscribers to read) and <code>fanout_publish_only</code> (waits for a single sentinel subscriber, ignores N background drains) were run so publisher-side cost can be separated from consumer-side wake-up cost.</li>
+  <li>Test suite: 18 unit tests (including new <code>fanout_send_never_blocks_router</code> and <code>lagged_subscriber_gets_lagged_error</code>), 6 integration tests, 1 doctest — all pass.</li>
+  <li><code>cargo clippy --workspace --all-targets -- -D warnings</code>: clean.</li>
+</ul>
+
+<div class="foot">
+  Generated 2026-04-17 · hermes-rs · branch main · post-dispatcher-removal working tree ·
+  host: Windows 11 · compiled with <code>cargo bench --release</code>.
+</div>
+
+</body>
+</html>

@@ -140,7 +140,7 @@ impl Broker for BrokerService {
                                     match rx.recv().await {
                                         Ok(delivery) => {
                                             if resp_tx
-                                                .send(Ok(delivery_to_response(delivery)))
+                                                .send(Ok(delivery_to_response(&delivery)))
                                                 .await
                                                 .is_err()
                                             {
@@ -169,7 +169,7 @@ impl Broker for BrokerService {
                             tokio::spawn(async move {
                                 while let Ok(delivery) = rx.recv().await {
                                     if resp_tx
-                                        .send(Ok(delivery_to_response(delivery)))
+                                        .send(Ok(delivery_to_response(&delivery)))
                                         .await
                                         .is_err()
                                     {
@@ -198,11 +198,15 @@ impl Broker for BrokerService {
     }
 }
 
-fn delivery_to_response(d: Delivery) -> SubscribeResponse {
+fn delivery_to_response(d: &Delivery) -> SubscribeResponse {
     SubscribeResponse {
-        subject: d.subject.into(),
+        subject: d.subject.to_string(),
         payload: d.payload.to_vec(),
         sequence: d.sequence,
-        reply_to: d.reply_to.map(|s| s.into()).unwrap_or_default(),
+        reply_to: d
+            .reply_to
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
     }
 }

@@ -1,8 +1,42 @@
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::sync::broadcast;
 use tracing::{debug, trace};
+
+/// Identity hasher for `u64`-keyed maps with internally-generated,
+/// non-adversarial keys (`SlotId`, `SubId`). Skips the default SipHash
+/// mixing entirely — just returns the key bytes as the hash. Safe here
+/// because keys are monotonic u64s allocated by the router itself.
+///
+/// INVARIANT: only valid for single-field `u64` newtype keys. `write_u64`
+/// overwrites rather than mixes, so composite keys (multiple `write_*`
+/// calls per hash) would silently lose all but the last field. Do not
+/// use this hasher with types whose `Hash` impl writes more than one u64.
+#[derive(Default)]
+struct IdentityU64Hasher(u64);
+
+impl Hasher for IdentityU64Hasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback for any non-u64 derive path; pack what we can.
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+type U64Map<K, V> = HashMap<K, V, BuildHasherDefault<IdentityU64Hasher>>;
 
 use crate::trie::SlotId;
 
@@ -23,21 +57,34 @@ pub struct Delivery {
     pub reply_to: Option<Box<str>>,
 }
 
+/// `(subject, queue_group)` index key. `None` queue group = fanout slot.
+type IndexKey = (Box<str>, Option<Box<str>>);
+
 /// A routing slot attached to trie nodes.
+///
+/// Channels carry `Arc<Delivery>` so that every receiver-side clone is a
+/// single atomic refcount bump — no heap allocation per subscriber, which
+/// was the dominant fanout cost for large slots.
 pub enum Slot {
-    /// Fanout: one send, all receivers get it.
+    /// Fanout: router calls `sender.send` directly. `broadcast::send` is a
+    /// synchronous non-blocking call that writes to the internal ring
+    /// (slow receivers get a `Lagged` error on their next recv) and walks
+    /// the waker list inline. No dispatcher task, no extra hop, no await.
     Broadcast {
-        sender: broadcast::Sender<Delivery>,
-        /// Explicitly tracked subscriber count (don't rely on receiver_count()).
+        /// Template sender kept so new subscribers can `.subscribe()` a receiver.
+        sender: broadcast::Sender<Arc<Delivery>>,
+        /// Explicitly tracked subscriber count. `broadcast::Sender::receiver_count()`
+        /// lags our view (grpc tasks keep receivers alive briefly after router
+        /// marks the sub removed), so we count ourselves for cleanup decisions.
         sub_count: usize,
     },
     /// Load-balanced: one shared MPMC channel, members compete to receive.
     /// Whichever member task is idle first takes the delivery — natural
     /// work-stealing, no cursor bookkeeping, no head-of-line blocking.
     QueueGroup {
-        tx: kanal::AsyncSender<Delivery>,
+        tx: kanal::AsyncSender<Arc<Delivery>>,
         /// Template receiver kept so new subscribers can clone their own handle.
-        rx: kanal::AsyncReceiver<Delivery>,
+        rx: kanal::AsyncReceiver<Arc<Delivery>>,
         /// Member SubIds, only used for disconnect bookkeeping.
         member_ids: Vec<SubId>,
     },
@@ -50,7 +97,7 @@ pub enum SubHandle {
         /// Unique subscriber identifier.
         sub_id: SubId,
         /// Broadcast receiver for incoming deliveries.
-        rx: broadcast::Receiver<Delivery>,
+        rx: broadcast::Receiver<Arc<Delivery>>,
     },
     /// Queue group member — shares a kanal MPMC receiver with its peers.
     /// Each delivery is taken by exactly one member; idle members pick up
@@ -59,7 +106,7 @@ pub enum SubHandle {
         /// Unique subscriber identifier.
         sub_id: SubId,
         /// Kanal async receiver cloned from the group's shared channel.
-        rx: kanal::AsyncReceiver<Delivery>,
+        rx: kanal::AsyncReceiver<Arc<Delivery>>,
     },
 }
 
@@ -69,11 +116,17 @@ pub enum SubHandle {
 /// Used exclusively by the [`Router`](crate::router::Router).
 #[derive(Default)]
 pub struct SlotMap {
-    slots: HashMap<SlotId, Slot>,
-    /// (subject, queue_group_or_empty) → SlotId
-    index: HashMap<(Box<str>, Box<str>), SlotId>,
-    /// Reverse: SubId → list of (SlotId, subject) for cleanup on disconnect.
-    sub_slots: HashMap<SubId, Vec<(SlotId, Box<str>)>>,
+    /// Hot path: looked up per publish. Uses identity hash on `SlotId(u64)`.
+    slots: U64Map<SlotId, Slot>,
+    /// `(subject, Option<queue_group>) → SlotId`. Cold path — only touched on
+    /// subscribe/unsubscribe, so default string hash is fine.
+    index: HashMap<IndexKey, SlotId>,
+    /// Reverse of `index`: `SlotId → IndexKey`. Lets `remove_subscriber` drop
+    /// the index entry in O(1) instead of a full `index.retain` scan.
+    slot_keys: U64Map<SlotId, IndexKey>,
+    /// `SubId → list of (SlotId, subject)` for cleanup on disconnect.
+    /// Cold path, identity hash gives a small win for the disconnect sweep.
+    sub_slots: U64Map<SubId, Vec<(SlotId, Box<str>)>>,
     next_slot_id: u64,
     next_sub_id: u64,
 }
@@ -81,13 +134,7 @@ pub struct SlotMap {
 impl SlotMap {
     /// Create an empty slot map.
     pub fn new() -> Self {
-        Self {
-            slots: HashMap::new(),
-            index: HashMap::new(),
-            sub_slots: HashMap::new(),
-            next_slot_id: 0,
-            next_sub_id: 0,
-        }
+        Self::default()
     }
 
     fn alloc_slot_id(&mut self) -> SlotId {
@@ -103,19 +150,22 @@ impl SlotMap {
     }
 
     /// Subscribe to a fanout (broadcast) slot. Creates the slot if it doesn't exist.
-    /// Returns `(SubHandle, Option<SlotId>)` — SlotId is Some if a new slot was created
-    /// (caller must insert it into the trie).
+    /// Returns `(SubHandle, Option<SlotId>)` — `SlotId` is `Some` if a new slot was
+    /// created (caller must insert it into the trie).
     pub fn subscribe_fanout(
         &mut self,
         subject: &str,
         broadcast_capacity: usize,
     ) -> (SubHandle, Option<SlotId>) {
-        let key = (Box::from(subject), Box::from(""));
+        let key: IndexKey = (Box::from(subject), None);
         let sub_id = self.alloc_sub_id();
 
         if let Some(&slot_id) = self.index.get(&key) {
             // Existing broadcast slot — just clone a receiver.
-            if let Some(Slot::Broadcast { sender, sub_count }) = self.slots.get_mut(&slot_id) {
+            if let Some(Slot::Broadcast {
+                sender, sub_count, ..
+            }) = self.slots.get_mut(&slot_id)
+            {
                 let rx = sender.subscribe();
                 *sub_count += 1;
                 self.sub_slots
@@ -133,9 +183,12 @@ impl SlotMap {
             }
         }
 
-        // New broadcast slot.
+        // New fanout slot. Router publishes by calling `sender.send` directly —
+        // tokio broadcast is synchronous non-blocking, so there is no need for
+        // an intermediate dispatcher task or mpsc channel.
         let slot_id = self.alloc_slot_id();
         let (sender, rx) = broadcast::channel(broadcast_capacity);
+
         self.slots.insert(
             slot_id,
             Slot::Broadcast {
@@ -143,7 +196,8 @@ impl SlotMap {
                 sub_count: 1,
             },
         );
-        self.index.insert(key, slot_id);
+        self.index.insert(key.clone(), slot_id);
+        self.slot_keys.insert(slot_id, key);
         self.sub_slots
             .entry(sub_id)
             .or_default()
@@ -167,13 +221,11 @@ impl SlotMap {
         group: &str,
         channel_capacity: usize,
     ) -> (SubHandle, Option<SlotId>) {
-        let key = (Box::from(subject), Box::from(group));
+        let key: IndexKey = (Box::from(subject), Some(Box::from(group)));
         let sub_id = self.alloc_sub_id();
 
         if let Some(&slot_id) = self.index.get(&key)
-            && let Some(Slot::QueueGroup {
-                rx, member_ids, ..
-            }) = self.slots.get_mut(&slot_id)
+            && let Some(Slot::QueueGroup { rx, member_ids, .. }) = self.slots.get_mut(&slot_id)
         {
             let member_rx = rx.clone();
             member_ids.push(sub_id);
@@ -200,7 +252,7 @@ impl SlotMap {
 
         // New queue group slot — one shared MPMC channel for all members.
         let slot_id = self.alloc_slot_id();
-        let (tx, rx) = kanal::bounded_async::<Delivery>(channel_capacity);
+        let (tx, rx) = kanal::bounded_async::<Arc<Delivery>>(channel_capacity);
         let member_rx = rx.clone();
         self.slots.insert(
             slot_id,
@@ -210,7 +262,8 @@ impl SlotMap {
                 member_ids: vec![sub_id],
             },
         );
-        self.index.insert(key, slot_id);
+        self.index.insert(key.clone(), slot_id);
+        self.slot_keys.insert(slot_id, key);
         self.sub_slots
             .entry(sub_id)
             .or_default()
@@ -268,8 +321,9 @@ impl SlotMap {
 
                 if should_remove {
                     self.slots.remove(&slot_id);
-                    // Find and remove from index.
-                    self.index.retain(|_, v| *v != slot_id);
+                    if let Some(key) = self.slot_keys.remove(&slot_id) {
+                        self.index.remove(&key);
+                    }
                     empty_slots.push((slot_id, subject));
                 }
             }

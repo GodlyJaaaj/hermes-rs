@@ -29,9 +29,10 @@ tokio        = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
 # ── Data structures ──
-bytes    = "1"
-smallvec = "2.0.0-alpha.12"
-kanal    = "0.1.1"
+bytes      = "1"
+smallvec   = "2.0.0-alpha.12"
+kanal      = "0.1.1"
+rustc-hash = "2"
 
 # ── Error handling ──
 thiserror = "2"
