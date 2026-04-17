@@ -12,6 +12,17 @@ use crate::trie::SlotId;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SubId(pub u64);
 
+/// Identifier for a subscribe session — typically one per gRPC subscribe
+/// stream. All subscribers created under a session are cleaned up in one
+/// shot when the session ends, instead of the caller tracking SubIds and
+/// firing N [`RouterCmd::Disconnect`](crate::router::RouterCmd::Disconnect)
+/// commands.
+///
+/// Allocated by the caller (the server assigns a fresh value from a
+/// process-wide counter, tests mint them locally). Opaque to the router.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SessionId(pub u64);
+
 /// A message routed through the broker.
 #[derive(Clone, Debug)]
 pub struct Delivery {
@@ -95,6 +106,9 @@ pub struct SlotMap {
     /// `SubId → list of (SlotId, subject)` for cleanup on disconnect.
     /// Cold path, identity hash gives a small win for the disconnect sweep.
     sub_slots: FxHashMap<SubId, Vec<(SlotId, Box<str>)>>,
+    /// `SessionId → list of SubIds` — lets a single `end_session` drop every
+    /// subscriber created under that session.
+    session_subs: FxHashMap<SessionId, Vec<SubId>>,
     next_slot_id: u64,
     next_sub_id: u64,
 }
@@ -117,12 +131,30 @@ impl SlotMap {
         id
     }
 
+    /// Record a newly-created subscriber in both the per-sub reverse index
+    /// (used for single-sub `remove_subscriber`) and the per-session index
+    /// (used for `end_session`).
+    fn register_sub(
+        &mut self,
+        sub_id: SubId,
+        session_id: SessionId,
+        slot_id: SlotId,
+        subject: &str,
+    ) {
+        self.sub_slots
+            .entry(sub_id)
+            .or_default()
+            .push((slot_id, Box::from(subject)));
+        self.session_subs.entry(session_id).or_default().push(sub_id);
+    }
+
     /// Subscribe to a fanout (broadcast) slot. Creates the slot if it doesn't exist.
     /// Returns `(SubHandle, Option<SlotId>)` — `SlotId` is `Some` if a new slot was
     /// created (caller must insert it into the trie).
     pub fn subscribe_fanout(
         &mut self,
         subject: &str,
+        session_id: SessionId,
         broadcast_capacity: usize,
     ) -> (SubHandle, Option<SlotId>) {
         let key: IndexKey = (Box::from(subject), None);
@@ -136,15 +168,13 @@ impl SlotMap {
             {
                 let rx = sender.subscribe();
                 *sub_count += 1;
-                self.sub_slots
-                    .entry(sub_id)
-                    .or_default()
-                    .push((slot_id, Box::from(subject)));
+                let count_snapshot = *sub_count;
+                self.register_sub(sub_id, session_id, slot_id, subject);
                 debug!(
                     subject,
                     slot_id = slot_id.0,
                     sub_id = sub_id.0,
-                    sub_count = *sub_count,
+                    sub_count = count_snapshot,
                     "joined existing fanout slot"
                 );
                 return (SubHandle::Fanout { sub_id, rx }, None);
@@ -166,10 +196,7 @@ impl SlotMap {
         );
         self.index.insert(key.clone(), slot_id);
         self.slot_keys.insert(slot_id, key);
-        self.sub_slots
-            .entry(sub_id)
-            .or_default()
-            .push((slot_id, Box::from(subject)));
+        self.register_sub(sub_id, session_id, slot_id, subject);
 
         debug!(
             subject,
@@ -187,6 +214,7 @@ impl SlotMap {
         &mut self,
         subject: &str,
         group: &str,
+        session_id: SessionId,
         channel_capacity: usize,
     ) -> (SubHandle, Option<SlotId>) {
         let key: IndexKey = (Box::from(subject), Some(Box::from(group)));
@@ -197,16 +225,14 @@ impl SlotMap {
         {
             let member_rx = rx.clone();
             member_ids.push(sub_id);
-            self.sub_slots
-                .entry(sub_id)
-                .or_default()
-                .push((slot_id, Box::from(subject)));
+            let member_count = member_ids.len();
+            self.register_sub(sub_id, session_id, slot_id, subject);
             debug!(
                 subject,
                 group,
                 slot_id = slot_id.0,
                 sub_id = sub_id.0,
-                member_count = member_ids.len(),
+                member_count,
                 "joined existing queue group"
             );
             return (
@@ -232,10 +258,7 @@ impl SlotMap {
         );
         self.index.insert(key.clone(), slot_id);
         self.slot_keys.insert(slot_id, key);
-        self.sub_slots
-            .entry(sub_id)
-            .or_default()
-            .push((slot_id, Box::from(subject)));
+        self.register_sub(sub_id, session_id, slot_id, subject);
 
         debug!(
             subject,
@@ -297,6 +320,31 @@ impl SlotMap {
             }
         }
 
+        empty_slots
+    }
+
+    /// Drop every subscriber created under `session_id`. Returns the aggregated
+    /// list of `(SlotId, subject)` that became empty so the caller can prune
+    /// them from the trie. Equivalent to calling [`remove_subscriber`] once per
+    /// [`SubId`] registered under the session, but avoids forcing the caller to
+    /// track SubIds itself.
+    ///
+    /// [`remove_subscriber`]: Self::remove_subscriber
+    pub fn end_session(&mut self, session_id: SessionId) -> Vec<(SlotId, Box<str>)> {
+        let Some(sub_ids) = self.session_subs.remove(&session_id) else {
+            return Vec::new();
+        };
+
+        debug!(
+            session_id = session_id.0,
+            sub_count = sub_ids.len(),
+            "ending session"
+        );
+
+        let mut empty_slots = Vec::new();
+        for sub_id in sub_ids {
+            empty_slots.extend(self.remove_subscriber(sub_id));
+        }
         empty_slots
     }
 

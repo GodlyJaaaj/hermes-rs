@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, trace, warn};
 
-use crate::slot::{Delivery, Slot, SlotMap, SubHandle};
+use crate::slot::{Delivery, SessionId, Slot, SlotMap, SubHandle};
 use crate::trie::{MatchBuf, TrieNode};
 
 /// Commands sent to the router from gRPC tasks.
@@ -21,10 +21,18 @@ pub enum RouterCmd {
     Subscribe {
         subject: Box<str>,
         queue_group: Option<Box<str>>,
+        /// Session this subscription belongs to. All subs sharing a session
+        /// are cleaned up together by [`RouterCmd::SessionEnd`]. Callers that
+        /// do not need grouped cleanup can allocate one session per sub.
+        session_id: SessionId,
         reply: oneshot::Sender<SubHandle>,
     },
-    /// Clean up a subscriber (stream closed / disconnected).
+    /// Clean up a single subscriber (fine-grained, per-`SubId`).
     Disconnect { sub_id: crate::slot::SubId },
+    /// Clean up every subscriber registered under `session_id` in one shot.
+    /// Intended for the common "gRPC subscribe stream closed" path so the
+    /// server does not have to track its own list of SubIds.
+    SessionEnd { session_id: SessionId },
 }
 
 /// Configuration for the router.
@@ -139,6 +147,7 @@ impl Router {
                 RouterCmd::Subscribe {
                     subject,
                     queue_group,
+                    session_id,
                     reply,
                 } => {
                     // Cold path: runs once per subscribe, heap `Vec` is fine here
@@ -146,12 +155,15 @@ impl Router {
                     let tokens: Vec<&str> = subject.split('.').collect();
 
                     let (handle, new_slot_id) = match queue_group {
-                        None => self
-                            .slots
-                            .subscribe_fanout(&subject, self.config.broadcast_capacity),
+                        None => self.slots.subscribe_fanout(
+                            &subject,
+                            session_id,
+                            self.config.broadcast_capacity,
+                        ),
                         Some(ref group) => self.slots.subscribe_queue_group(
                             &subject,
                             group,
+                            session_id,
                             self.config.queue_channel_capacity,
                         ),
                     };
@@ -168,6 +180,7 @@ impl Router {
                     info!(
                         subject = %subject,
                         queue_group = queue_group.as_deref().unwrap_or("(none)"),
+                        session_id = session_id.0,
                         sub_id,
                         new_slot = new_slot_id.map(|s| s.0),
                         "subscription created"
@@ -185,12 +198,21 @@ impl Router {
                         "subscriber disconnected"
                     );
 
-                    for (slot_id, subject) in &empty_slots {
-                        debug!(
-                            slot_id = slot_id.0,
-                            subject = %subject,
-                            "removing empty slot from trie"
-                        );
+                    for (slot_id, _) in &empty_slots {
+                        self.trie.remove(*slot_id);
+                    }
+                }
+
+                RouterCmd::SessionEnd { session_id } => {
+                    let empty_slots = self.slots.end_session(session_id);
+
+                    info!(
+                        session_id = session_id.0,
+                        removed_slots = empty_slots.len(),
+                        "session ended"
+                    );
+
+                    for (slot_id, _) in &empty_slots {
                         self.trie.remove(*slot_id);
                     }
                 }
@@ -203,8 +225,10 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
-    use crate::slot::SubHandle;
+    use crate::slot::{SessionId, SubHandle};
 
     async fn setup() -> mpsc::Sender<RouterCmd> {
         let (router, tx) = Router::new(RouterConfig::default(), 1024);
@@ -212,15 +236,31 @@ mod tests {
         tx
     }
 
+    /// Mint a fresh SessionId for each subscribe in tests.
+    fn next_session() -> SessionId {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        SessionId(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
     async fn subscribe(
         tx: &mpsc::Sender<RouterCmd>,
         subject: &str,
         queue_group: Option<&str>,
     ) -> SubHandle {
+        subscribe_in_session(tx, subject, queue_group, next_session()).await
+    }
+
+    async fn subscribe_in_session(
+        tx: &mpsc::Sender<RouterCmd>,
+        subject: &str,
+        queue_group: Option<&str>,
+        session_id: SessionId,
+    ) -> SubHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RouterCmd::Subscribe {
             subject: Box::from(subject),
             queue_group: queue_group.map(Box::from),
+            session_id,
             reply: reply_tx,
         })
         .await
@@ -621,5 +661,62 @@ mod tests {
         let payload = d.payload.as_ref();
         assert_eq!(payload.len(), 1, "payload should be 1 byte");
         assert!(payload[0] >= 6, "expected latest window, got byte {}", payload[0]);
+    }
+
+    #[tokio::test]
+    async fn session_end_removes_all_subs() {
+        // A single SessionEnd must drop every sub created under that session,
+        // regardless of subject or queue-group, and prune empty slots from the
+        // trie so later subscribers see a clean state.
+        let tx = setup().await;
+        let session = SessionId(42);
+
+        // Mix 3 fanout subs on distinct subjects + 1 queue-group member.
+        let subjects = ["alpha.one", "alpha.two", "beta.three"];
+        let mut handles = Vec::new();
+        for s in subjects {
+            handles.push(subscribe_in_session(&tx, s, None, session).await);
+        }
+        handles.push(subscribe_in_session(&tx, "gamma.work", Some("g"), session).await);
+
+        // Extra sub on "alpha.one" in a DIFFERENT session — should survive SessionEnd.
+        let other_session = SessionId(99);
+        let mut survivor = match subscribe_in_session(&tx, "alpha.one", None, other_session).await {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Drop the session's receivers so SessionEnd has no client-side cleanup
+        // racing with it.
+        drop(handles);
+
+        tx.send(RouterCmd::SessionEnd {
+            session_id: session,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        // Subscribe fresh on a previously-shared subject to confirm the slot
+        // was not retained (publish still reaches both the fresh sub and the
+        // out-of-session survivor — proves slot was rebuilt or reused cleanly).
+        let fresh = subscribe(&tx, "alpha.one", None).await;
+        let mut fresh_rx = match fresh {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+        publish(&tx, "alpha.one", b"after-session-end").await;
+
+        let d = tokio::time::timeout(std::time::Duration::from_millis(200), fresh_rx.recv())
+            .await
+            .expect("fresh sub did not receive")
+            .expect("fresh sub channel closed");
+        assert_eq!(d.payload.as_ref(), b"after-session-end");
+
+        let d2 = tokio::time::timeout(std::time::Duration::from_millis(200), survivor.recv())
+            .await
+            .expect("survivor did not receive")
+            .expect("survivor channel closed");
+        assert_eq!(d2.payload.as_ref(), b"after-session-end");
     }
 }

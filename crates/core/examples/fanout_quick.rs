@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use bytes::Bytes;
 use hermes_broker_core::router::{Router, RouterCmd, RouterConfig};
-use hermes_broker_core::slot::SubHandle;
+use hermes_broker_core::slot::{SessionId, SubHandle};
 use tokio::sync::{Notify, oneshot};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -21,6 +21,7 @@ async fn main() {
             tx.send(RouterCmd::Subscribe {
                 subject: Box::from("bench.subj"),
                 queue_group: None,
+                session_id: SessionId(0),
                 reply: reply_tx,
             }).await.unwrap();
             let d = done.clone();

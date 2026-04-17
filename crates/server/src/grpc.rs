@@ -1,8 +1,9 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hermes_broker::router::RouterCmd;
-use hermes_broker::slot::{Delivery, SubHandle, SubId};
+use hermes_broker::slot::{Delivery, SessionId, SubHandle, SubId};
 use hermes_proto::{
     PublishAck, PublishRequest, SubscribeRequest, SubscribeResponse, broker_server::Broker,
 };
@@ -125,10 +126,15 @@ impl Broker for BrokerService {
         let router_tx = self.router_tx.clone();
         let (resp_tx, resp_rx) = mpsc::channel::<Result<SubscribeResponse, tonic::Status>>(256);
 
-        info!("new subscribe stream opened");
+        // One session per subscribe stream. When the stream closes, a single
+        // SessionEnd tells the router to drop every sub registered under it.
+        static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+        let session_id = SessionId(NEXT_SESSION.fetch_add(1, Ordering::Relaxed));
+
+        info!(session_id = session_id.0, "new subscribe stream opened");
 
         tokio::spawn(async move {
-            let mut active_subs: Vec<SubId> = Vec::new();
+            let mut sub_count: usize = 0;
 
             while let Some(result) = inbound.next().await {
                 let msg = match result {
@@ -144,6 +150,7 @@ impl Broker for BrokerService {
                 debug!(
                     subject = %sub.subject,
                     queue_group = %sub.queue_group,
+                    session_id = session_id.0,
                     "processing subscribe request"
                 );
 
@@ -155,6 +162,7 @@ impl Broker for BrokerService {
                     } else {
                         Some(sub.queue_group.into())
                     },
+                    session_id,
                     reply: reply_tx,
                 };
 
@@ -165,7 +173,7 @@ impl Broker for BrokerService {
 
                 if let Ok(handle) = reply_rx.await {
                     let (sub_id, mut rx) = split_handle(handle);
-                    active_subs.push(sub_id);
+                    sub_count += 1;
 
                     let resp_tx = resp_tx.clone();
                     tokio::spawn(async move {
@@ -195,14 +203,14 @@ impl Broker for BrokerService {
                 }
             }
 
-            // Client disconnected — clean up all subscriptions.
             info!(
-                active_subscriptions = active_subs.len(),
+                session_id = session_id.0,
+                sub_count,
                 "subscribe stream closed, cleaning up"
             );
-            for sub_id in active_subs {
-                let _ = router_tx.send(RouterCmd::Disconnect { sub_id }).await;
-            }
+            let _ = router_tx
+                .send(RouterCmd::SessionEnd { session_id })
+                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(resp_rx);
