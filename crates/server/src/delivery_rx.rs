@@ -21,6 +21,15 @@ pub enum RxOutcome {
     Closed,
 }
 
+/// Non-blocking outcome: `Empty` means nothing is immediately ready, used
+/// by the batching forwarder to stop draining without yielding.
+pub enum TryRxOutcome {
+    Got(Arc<Delivery>),
+    Lagged(u64),
+    Empty,
+    Closed,
+}
+
 impl DeliveryRx {
     pub async fn recv(&mut self) -> RxOutcome {
         match self {
@@ -32,6 +41,25 @@ impl DeliveryRx {
             DeliveryRx::Queue(rx) => match rx.recv().await {
                 Ok(d) => RxOutcome::Got(d),
                 Err(_) => RxOutcome::Closed,
+            },
+        }
+    }
+
+    /// Non-blocking drain step for the batching forwarder. Returns
+    /// `Empty` immediately if no delivery is ready — lets us batch
+    /// opportunistically without ever waiting on a timer.
+    pub fn try_recv(&mut self) -> TryRxOutcome {
+        match self {
+            DeliveryRx::Fanout(rx) => match rx.try_recv() {
+                Ok(d) => TryRxOutcome::Got(d),
+                Err(broadcast::error::TryRecvError::Lagged(n)) => TryRxOutcome::Lagged(n),
+                Err(broadcast::error::TryRecvError::Empty) => TryRxOutcome::Empty,
+                Err(broadcast::error::TryRecvError::Closed) => TryRxOutcome::Closed,
+            },
+            DeliveryRx::Queue(rx) => match rx.try_recv() {
+                Ok(Some(d)) => TryRxOutcome::Got(d),
+                Ok(None) => TryRxOutcome::Empty,
+                Err(_) => TryRxOutcome::Closed,
             },
         }
     }

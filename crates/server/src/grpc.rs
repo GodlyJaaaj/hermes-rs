@@ -4,14 +4,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use hermes_broker::router::RouterCmd;
 use hermes_broker::slot::{Delivery, SessionId};
 use hermes_proto::{
-    PublishAck, PublishRequest, SubscribeRequest, SubscribeResponse, broker_server::Broker,
+    Message, PublishAck, PublishRequest, SubscribeRequest, SubscribeResponse,
+    broker_server::Broker,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Streaming};
 use tracing::{debug, info, warn};
 
-use crate::delivery_rx::{RxOutcome, split_handle};
+use crate::delivery_rx::{RxOutcome, TryRxOutcome, split_handle};
+
+/// Max deliveries accumulated into a single `SubscribeResponse` frame.
+/// Caps worst-case frame size so one sub can't monopolize the h2 write loop.
+const BATCH_MAX: usize = 32;
 
 /// gRPC implementation of the Hermes [`Broker`] service.
 ///
@@ -141,27 +146,7 @@ impl Broker for BrokerService {
 
                     let resp_tx = resp_tx.clone();
                     tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                RxOutcome::Got(delivery) => {
-                                    if resp_tx
-                                        .send(Ok(delivery_to_response(&delivery)))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                                RxOutcome::Lagged(n) => {
-                                    warn!(
-                                        sub_id = sub_id.0,
-                                        skipped = n,
-                                        "fanout subscriber lagged, messages lost"
-                                    );
-                                }
-                                RxOutcome::Closed => break,
-                            }
-                        }
+                        forward_deliveries(sub_id.0, &mut rx, resp_tx).await;
                         debug!(sub_id = sub_id.0, "forwarding task ended");
                     });
                 }
@@ -182,8 +167,8 @@ impl Broker for BrokerService {
     }
 }
 
-fn delivery_to_response(d: &Delivery) -> SubscribeResponse {
-    SubscribeResponse {
+fn delivery_to_message(d: &Delivery) -> Message {
+    Message {
         subject: d.subject.to_string(),
         payload: d.payload.to_vec(),
         sequence: d.sequence,
@@ -192,5 +177,62 @@ fn delivery_to_response(d: &Delivery) -> SubscribeResponse {
             .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_default(),
+    }
+}
+
+/// Drain a subscriber's delivery channel into the outbound gRPC response
+/// channel, opportunistically batching deliveries that are already ready
+/// into one `SubscribeResponse` frame. Never waits on a timer — the block
+/// only happens on the first delivery; subsequent ones are drained via
+/// `try_recv` until the channel reports `Empty`, then the batch flushes.
+/// Under burst load this collapses N deliveries into 1 frame (fewer h2
+/// lock acquisitions); under single-message load there is zero added
+/// latency.
+async fn forward_deliveries(
+    sub_id: u64,
+    rx: &mut crate::delivery_rx::DeliveryRx,
+    resp_tx: mpsc::Sender<Result<SubscribeResponse, tonic::Status>>,
+) {
+    let mut batch: Vec<Message> = Vec::with_capacity(BATCH_MAX);
+
+    loop {
+        // Block on the first delivery of this round.
+        match rx.recv().await {
+            RxOutcome::Got(d) => batch.push(delivery_to_message(&d)),
+            RxOutcome::Lagged(n) => {
+                warn!(sub_id, skipped = n, "fanout subscriber lagged, messages lost");
+                continue;
+            }
+            RxOutcome::Closed => return,
+        }
+
+        // Drain anything already ready, up to the batch cap.
+        let mut closed = false;
+        while batch.len() < BATCH_MAX {
+            match rx.try_recv() {
+                TryRxOutcome::Got(d) => batch.push(delivery_to_message(&d)),
+                TryRxOutcome::Lagged(n) => {
+                    warn!(sub_id, skipped = n, "fanout subscriber lagged, messages lost");
+                }
+                TryRxOutcome::Empty => break,
+                TryRxOutcome::Closed => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+
+        let messages = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_MAX));
+        if resp_tx
+            .send(Ok(SubscribeResponse { messages }))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        if closed {
+            return;
+        }
     }
 }

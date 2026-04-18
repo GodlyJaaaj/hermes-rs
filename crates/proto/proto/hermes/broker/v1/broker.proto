@@ -28,9 +28,13 @@ message Sub {
   string queue_group = 2;
 }
 
-message SubscribeResponse {
+message Message {
   string subject = 1;
   bytes payload = 2;
   uint64 sequence = 3;
   string reply_to = 4;
+}
+
+message SubscribeResponse {
+  repeated Message messages = 1;
 }

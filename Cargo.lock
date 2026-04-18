@@ -540,7 +540,9 @@ dependencies = [
 name = "hermes-broker-server"
 version = "0.6.2"
 dependencies = [
+ "bytes",
  "clap",
+ "criterion",
  "hermes-broker-client",
  "hermes-broker-core",
  "hermes-broker-proto",
