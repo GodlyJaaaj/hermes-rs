@@ -31,7 +31,8 @@ service Broker {
 | `PublishAck` | `total_published` | Returned when the publish stream closes. |
 | `SubscribeRequest` | `sub` | A subscription command containing a `Sub`. |
 | `Sub` | `subject`, `queue_group` | Subject pattern to subscribe to. `queue_group` enables load-balanced delivery. |
-| `SubscribeResponse` | `subject`, `payload`, `sequence`, `reply_to` | A delivered message with a monotonically increasing sequence number. |
+| `Message` | `subject`, `payload`, `sequence`, `reply_to` | A delivered message with a monotonically increasing sequence number. |
+| `SubscribeResponse` | `messages` (repeated `Message`) | One or more deliveries grouped into a single frame. The server coalesces deliveries that are ready at the same time, amortizing per-frame overhead on the fanout hot path. The client splits the batch transparently. |
 
 ## Usage
 
@@ -39,13 +40,13 @@ This crate is a dependency of `hermes-broker-client` and `hermes-broker-server` 
 
 ```toml
 [dependencies]
-hermes-broker-proto = "0.6"
+hermes-broker-proto = "0.7"
 ```
 
 All generated types are available at the crate root:
 
 ```rust
-use hermes_broker_proto::{PublishRequest, SubscribeRequest, SubscribeResponse, Sub};
+use hermes_broker_proto::{Message, PublishRequest, SubscribeRequest, SubscribeResponse, Sub};
 use hermes_broker_proto::broker_client::BrokerClient;
 use hermes_broker_proto::broker_server::{Broker, BrokerServer};
 ```

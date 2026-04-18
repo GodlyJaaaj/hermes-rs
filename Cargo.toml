@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.6.2"
+version = "0.7.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/GodlyJaaaj/hermes-rs"
 keywords = ["messaging", "broker", "grpc", "pubsub", "events"]
@@ -12,10 +12,10 @@ categories = ["network-programming", "asynchronous"]
 
 [workspace.dependencies]
 # ── Internal crates (version pinned to workspace.package.version) ──
-hermes-proto  = { package = "hermes-broker-proto",   path = "crates/proto",   version = "0.6.2" }
-hermes-broker = { package = "hermes-broker-core",    path = "crates/core",    version = "0.6.2" }
-hermes-client = { package = "hermes-broker-client",  path = "crates/client",  version = "0.6.2" }
-hermes-server = { package = "hermes-broker-server",  path = "crates/server",  version = "0.6.2" }
+hermes-proto  = { package = "hermes-broker-proto",   path = "crates/proto",   version = "0.7.0" }
+hermes-broker = { package = "hermes-broker-core",    path = "crates/core",    version = "0.7.0" }
+hermes-client = { package = "hermes-broker-client",  path = "crates/client",  version = "0.7.0" }
+hermes-server = { package = "hermes-broker-server",  path = "crates/server",  version = "0.7.0" }
 
 # ── gRPC / protobuf ──
 tonic              = { version = "0.14", features = ["tls-ring"] }

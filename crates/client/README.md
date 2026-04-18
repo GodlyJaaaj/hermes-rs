@@ -30,7 +30,7 @@ Or in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hermes-broker-client = "0.6"
+hermes-broker-client = "0.7"
 ```
 
 You'll also need a running Hermes broker — see [`hermes-broker-server`](https://crates.io/crates/hermes-broker-server).
