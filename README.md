@@ -171,7 +171,7 @@ service Broker {
 
 ```bash
 cargo build --workspace          # Build all crates
-cargo test --workspace           # Run all tests (11 unit + 6 integration)
+cargo test --workspace           # Run all tests (19 unit + 6 integration + 1 doctest)
 cargo clippy --workspace         # Lint
 cargo bench -p hermes-broker-core  # Run throughput benchmarks
 ```

@@ -1,5 +1,5 @@
 use hermes_proto::broker_client::BrokerClient;
-use hermes_proto::{Sub, SubscribeRequest, SubscribeResponse};
+use hermes_proto::{Message, Sub, SubscribeRequest};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -10,8 +10,8 @@ use tracing::{debug, info};
 pub struct Subscriber {
     /// Send sub commands to the gRPC stream.
     cmd_tx: mpsc::Sender<SubscribeRequest>,
-    /// Receive deliveries from the broker.
-    delivery_rx: mpsc::Receiver<SubscribeResponse>,
+    /// Receive deliveries from the broker (flattened from batched responses).
+    delivery_rx: mpsc::Receiver<Message>,
 }
 
 impl Subscriber {
@@ -19,17 +19,21 @@ impl Subscriber {
     pub async fn new(channel: Channel) -> Result<Self, tonic::Status> {
         let mut client = BrokerClient::new(channel);
         let (cmd_tx, cmd_rx) = mpsc::channel::<SubscribeRequest>(64);
-        let (delivery_tx, delivery_rx) = mpsc::channel::<SubscribeResponse>(256);
+        let (delivery_tx, delivery_rx) = mpsc::channel::<Message>(256);
 
         let response = client.subscribe(ReceiverStream::new(cmd_rx)).await?;
         let mut resp_stream = response.into_inner();
 
-        // Forward deliveries from gRPC stream to user.
+        // Forward deliveries from gRPC stream to user. Server batches N
+        // deliveries per SubscribeResponse; flatten transparently so the
+        // public `recv()` API still yields one message at a time.
         tokio::spawn(async move {
-            while let Ok(Some(msg)) = resp_stream.message().await {
-                if delivery_tx.send(msg).await.is_err() {
-                    debug!("subscriber delivery channel closed");
-                    break;
+            while let Ok(Some(resp)) = resp_stream.message().await {
+                for m in resp.messages {
+                    if delivery_tx.send(m).await.is_err() {
+                        debug!("subscriber delivery channel closed");
+                        return;
+                    }
                 }
             }
             debug!("subscriber stream ended");
@@ -68,7 +72,7 @@ impl Subscriber {
     }
 
     /// Receive the next delivery. Returns None if the stream is closed.
-    pub async fn recv(&mut self) -> Option<SubscribeResponse> {
+    pub async fn recv(&mut self) -> Option<Message> {
         self.delivery_rx.recv().await
     }
 }

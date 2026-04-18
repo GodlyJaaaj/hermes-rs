@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.6.2"
+version = "0.7.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/GodlyJaaaj/hermes-rs"
 keywords = ["messaging", "broker", "grpc", "pubsub", "events"]
@@ -12,10 +12,10 @@ categories = ["network-programming", "asynchronous"]
 
 [workspace.dependencies]
 # ── Internal crates (version pinned to workspace.package.version) ──
-hermes-proto  = { package = "hermes-broker-proto",   path = "crates/proto",   version = "0.6.2" }
-hermes-broker = { package = "hermes-broker-core",    path = "crates/core",    version = "0.6.2" }
-hermes-client = { package = "hermes-broker-client",  path = "crates/client",  version = "0.6.2" }
-hermes-server = { package = "hermes-broker-server",  path = "crates/server",  version = "0.6.2" }
+hermes-proto  = { package = "hermes-broker-proto",   path = "crates/proto",   version = "0.7.0" }
+hermes-broker = { package = "hermes-broker-core",    path = "crates/core",    version = "0.7.0" }
+hermes-client = { package = "hermes-broker-client",  path = "crates/client",  version = "0.7.0" }
+hermes-server = { package = "hermes-broker-server",  path = "crates/server",  version = "0.7.0" }
 
 # ── gRPC / protobuf ──
 tonic              = { version = "0.14", features = ["tls-ring"] }
@@ -29,9 +29,10 @@ tokio        = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
 # ── Data structures ──
-bytes    = "1"
-smallvec = "2.0.0-alpha.12"
-kanal    = "0.1.1"
+bytes      = "1"
+smallvec   = "2.0.0-alpha.12"
+kanal      = "0.1.1"
+rustc-hash = "2"
 
 # ── Error handling ──
 thiserror = "2"
@@ -40,5 +41,11 @@ thiserror = "2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# ── CLI ──
+clap = { version = "4", features = ["derive", "env"] }
+
 # ── Bench / test ──
 criterion = { version = "0.8", features = ["async_tokio"] }
+
+[profile.bench]
+debug = true

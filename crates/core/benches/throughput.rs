@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use hermes_broker_core::router::{Router, RouterCmd, RouterConfig};
-use hermes_broker_core::slot::SubHandle;
+use hermes_broker_core::slot::{SessionId, SubHandle};
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, oneshot};
 
@@ -67,6 +67,7 @@ fn bench_fanout_e2e(c: &mut Criterion) {
                         tx.send(RouterCmd::Subscribe {
                             subject: Box::from("bench.fanout.subject"),
                             queue_group: None,
+                            session_id: SessionId(0),
                             reply: reply_tx,
                         })
                         .await
@@ -155,6 +156,7 @@ fn bench_fanout_publish_only(c: &mut Criterion) {
                         tx.send(RouterCmd::Subscribe {
                             subject: Box::from("bench.publish.subject"),
                             queue_group: None,
+                            session_id: SessionId(0),
                             reply: reply_tx,
                         })
                         .await
@@ -188,6 +190,7 @@ fn bench_fanout_publish_only(c: &mut Criterion) {
                     tx.send(RouterCmd::Subscribe {
                         subject: Box::from("bench.publish.subject"),
                         queue_group: None,
+                        session_id: SessionId(0),
                         reply: reply_tx,
                     })
                     .await
@@ -205,12 +208,12 @@ fn bench_fanout_publish_only(c: &mut Criterion) {
                                                 return;
                                             }
                                         }
-                                        Err(
-                                            tokio::sync::broadcast::error::RecvError::Lagged(_),
-                                        ) => continue,
-                                        Err(
-                                            tokio::sync::broadcast::error::RecvError::Closed,
-                                        ) => return,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                                            _,
+                                        )) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            return;
+                                        }
                                     }
                                 }
                             });
@@ -267,6 +270,7 @@ fn bench_queue_group_e2e(c: &mut Criterion) {
                 tx.send(RouterCmd::Subscribe {
                     subject: Box::from("bench.queue"),
                     queue_group: Some(Box::from("workers")),
+                    session_id: SessionId(0),
                     reply: reply_tx,
                 })
                 .await
@@ -328,6 +332,7 @@ fn bench_wildcard_e2e(c: &mut Criterion) {
             tx.send(RouterCmd::Subscribe {
                 subject: Box::from("bench.*.data"),
                 queue_group: None,
+                session_id: SessionId(0),
                 reply: reply_tx,
             })
             .await

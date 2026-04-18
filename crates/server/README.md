@@ -61,7 +61,19 @@ Client ◄──── gRPC (tonic) ────► BrokerService ──── m
 
 ## Configuration
 
-### Environment Variables
+The binary accepts both CLI flags and environment variables. Explicit flags
+take precedence over env vars, which fall back to the hardcoded default.
+
+Run `hermes-broker-server --help` for the full list.
+
+### CLI Flags & Environment Variables
+
+| Flag | Env Variable | Default | Description |
+|------|--------------|---------|-------------|
+| `--addr <ADDR>` | `HERMES_ADDR` | `[::1]:50051` | Bind address for the gRPC listener |
+| `--router-capacity <N>` | `HERMES_ROUTER_CAPACITY` | `8192` | Capacity of the router command mpsc channel (publish/subscribe backpressure threshold) |
+
+### Env-only Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|

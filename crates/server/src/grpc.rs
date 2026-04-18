@@ -1,14 +1,22 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hermes_broker::router::RouterCmd;
-use hermes_broker::slot::{Delivery, SubHandle, SubId};
+use hermes_broker::slot::{Delivery, SessionId};
 use hermes_proto::{
-    PublishAck, PublishRequest, SubscribeRequest, SubscribeResponse, broker_server::Broker,
+    Message, PublishAck, PublishRequest, SubscribeRequest, SubscribeResponse,
+    broker_server::Broker,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Streaming};
 use tracing::{debug, info, warn};
+
+use crate::delivery_rx::{RxOutcome, TryRxOutcome, split_handle};
+
+/// Max deliveries accumulated into a single `SubscribeResponse` frame.
+/// Caps worst-case frame size so one sub can't monopolize the h2 write loop.
+const BATCH_MAX: usize = 32;
 
 /// gRPC implementation of the Hermes [`Broker`] service.
 ///
@@ -87,10 +95,15 @@ impl Broker for BrokerService {
         let router_tx = self.router_tx.clone();
         let (resp_tx, resp_rx) = mpsc::channel::<Result<SubscribeResponse, tonic::Status>>(256);
 
-        info!("new subscribe stream opened");
+        // One session per subscribe stream. When the stream closes, a single
+        // SessionEnd tells the router to drop every sub registered under it.
+        static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+        let session_id = SessionId(NEXT_SESSION.fetch_add(1, Ordering::Relaxed));
+
+        info!(session_id = session_id.0, "new subscribe stream opened");
 
         tokio::spawn(async move {
-            let mut active_subs: Vec<SubId> = Vec::new();
+            let mut sub_count: usize = 0;
 
             while let Some(result) = inbound.next().await {
                 let msg = match result {
@@ -106,6 +119,7 @@ impl Broker for BrokerService {
                 debug!(
                     subject = %sub.subject,
                     queue_group = %sub.queue_group,
+                    session_id = session_id.0,
                     "processing subscribe request"
                 );
 
@@ -117,6 +131,7 @@ impl Broker for BrokerService {
                     } else {
                         Some(sub.queue_group.into())
                     },
+                    session_id,
                     reply: reply_tx,
                 };
 
@@ -126,71 +141,25 @@ impl Broker for BrokerService {
                 }
 
                 if let Ok(handle) = reply_rx.await {
-                    let sub_id = match &handle {
-                        SubHandle::Fanout { sub_id, .. } => *sub_id,
-                        SubHandle::QueueMember { sub_id, .. } => *sub_id,
-                    };
-                    active_subs.push(sub_id);
+                    let (sub_id, mut rx) = split_handle(handle);
+                    sub_count += 1;
 
                     let resp_tx = resp_tx.clone();
-                    match handle {
-                        SubHandle::Fanout { mut rx, .. } => {
-                            tokio::spawn(async move {
-                                loop {
-                                    match rx.recv().await {
-                                        Ok(delivery) => {
-                                            if resp_tx
-                                                .send(Ok(delivery_to_response(delivery)))
-                                                .await
-                                                .is_err()
-                                            {
-                                                break;
-                                            }
-                                        }
-                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(
-                                            n,
-                                        )) => {
-                                            warn!(
-                                                sub_id = sub_id.0,
-                                                skipped = n,
-                                                "fanout subscriber lagged, messages lost"
-                                            );
-                                            continue;
-                                        }
-                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                            break;
-                                        }
-                                    }
-                                }
-                                debug!(sub_id = sub_id.0, "fanout forwarding task ended");
-                            });
-                        }
-                        SubHandle::QueueMember { rx, .. } => {
-                            tokio::spawn(async move {
-                                while let Ok(delivery) = rx.recv().await {
-                                    if resp_tx
-                                        .send(Ok(delivery_to_response(delivery)))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                                debug!(sub_id = sub_id.0, "queue member forwarding task ended");
-                            });
-                        }
-                    }
+                    tokio::spawn(async move {
+                        forward_deliveries(sub_id.0, &mut rx, resp_tx).await;
+                        debug!(sub_id = sub_id.0, "forwarding task ended");
+                    });
                 }
             }
 
-            // Client disconnected — clean up all subscriptions.
             info!(
-                active_subscriptions = active_subs.len(),
+                session_id = session_id.0,
+                sub_count,
                 "subscribe stream closed, cleaning up"
             );
-            for sub_id in active_subs {
-                let _ = router_tx.send(RouterCmd::Disconnect { sub_id }).await;
-            }
+            let _ = router_tx
+                .send(RouterCmd::SessionEnd { session_id })
+                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(resp_rx);
@@ -198,11 +167,72 @@ impl Broker for BrokerService {
     }
 }
 
-fn delivery_to_response(d: Delivery) -> SubscribeResponse {
-    SubscribeResponse {
-        subject: d.subject.into(),
+fn delivery_to_message(d: &Delivery) -> Message {
+    Message {
+        subject: d.subject.to_string(),
         payload: d.payload.to_vec(),
         sequence: d.sequence,
-        reply_to: d.reply_to.map(|s| s.into()).unwrap_or_default(),
+        reply_to: d
+            .reply_to
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// Drain a subscriber's delivery channel into the outbound gRPC response
+/// channel, opportunistically batching deliveries that are already ready
+/// into one `SubscribeResponse` frame. Never waits on a timer — the block
+/// only happens on the first delivery; subsequent ones are drained via
+/// `try_recv` until the channel reports `Empty`, then the batch flushes.
+/// Under burst load this collapses N deliveries into 1 frame (fewer h2
+/// lock acquisitions); under single-message load there is zero added
+/// latency.
+async fn forward_deliveries(
+    sub_id: u64,
+    rx: &mut crate::delivery_rx::DeliveryRx,
+    resp_tx: mpsc::Sender<Result<SubscribeResponse, tonic::Status>>,
+) {
+    let mut batch: Vec<Message> = Vec::with_capacity(BATCH_MAX);
+
+    loop {
+        // Block on the first delivery of this round.
+        match rx.recv().await {
+            RxOutcome::Got(d) => batch.push(delivery_to_message(&d)),
+            RxOutcome::Lagged(n) => {
+                warn!(sub_id, skipped = n, "fanout subscriber lagged, messages lost");
+                continue;
+            }
+            RxOutcome::Closed => return,
+        }
+
+        // Drain anything already ready, up to the batch cap.
+        let mut closed = false;
+        while batch.len() < BATCH_MAX {
+            match rx.try_recv() {
+                TryRxOutcome::Got(d) => batch.push(delivery_to_message(&d)),
+                TryRxOutcome::Lagged(n) => {
+                    warn!(sub_id, skipped = n, "fanout subscriber lagged, messages lost");
+                }
+                TryRxOutcome::Empty => break,
+                TryRxOutcome::Closed => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+
+        let messages = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_MAX));
+        if resp_tx
+            .send(Ok(SubscribeResponse { messages }))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        if closed {
+            return;
+        }
     }
 }

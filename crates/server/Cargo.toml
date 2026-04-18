@@ -15,7 +15,15 @@ tonic-reflection.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+kanal.workspace = true
+clap.workspace = true
 
 [dev-dependencies]
 hermes-client.workspace = true
 tracing-subscriber.workspace = true
+criterion.workspace = true
+bytes.workspace = true
+
+[[bench]]
+name = "grpc_e2e"
+harness = false

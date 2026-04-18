@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 /// Unique identifier for a routing slot (broadcast or queue-group).
@@ -8,6 +7,11 @@ use smallvec::SmallVec;
 /// the slot map and the trie.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SlotId(pub u64);
+
+/// Stack-allocated scratch buffer for matched slots on the publish hot path.
+/// Typical publishes match 1–3 slots; 16 inline slots keep the entire
+/// dispatch loop out of the heap for any realistic subscription pattern.
+pub type MatchBuf = SmallVec<SlotId, 16>;
 
 /// A node in the subject routing trie.
 ///
@@ -19,7 +23,7 @@ pub struct SlotId(pub u64);
 /// in a single traversal.
 #[derive(Default)]
 pub struct TrieNode {
-    children: HashMap<Box<str>, TrieNode>,
+    children: FxHashMap<Box<str>, TrieNode>,
     /// `*` wildcard child — matches any single token.
     wildcard: Option<Box<TrieNode>>,
     /// `>` tail-match — slots that match this node and everything below.
@@ -32,7 +36,7 @@ impl TrieNode {
     /// Create an empty trie node.
     pub fn new() -> Self {
         Self {
-            children: HashMap::new(),
+            children: FxHashMap::default(),
             wildcard: None,
             tail_match: SmallVec::new(),
             slots: SmallVec::new(),
@@ -78,15 +82,16 @@ impl TrieNode {
     }
 
     /// Find all slots matching a concrete (no-wildcard) subject.
-    /// Results are appended to `out`. Callers should clear `out` before calling.
-    pub fn lookup(&self, tokens: &[&str], out: &mut Vec<SlotId>) {
+    /// Results are appended to `out` (deduped on the fly — callers do not need
+    /// to sort/dedup afterwards). Callers should clear `out` before calling.
+    pub fn lookup(&self, tokens: &[&str], out: &mut MatchBuf) {
         match tokens {
             [] => {
-                out.extend_from_slice(&self.slots);
+                push_unique(out, &self.slots);
             }
             [token, rest @ ..] => {
                 // `>` matches one or more trailing tokens — only when tokens remain.
-                out.extend_from_slice(&self.tail_match);
+                push_unique(out, &self.tail_match);
                 // Exact child match.
                 if let Some(child) = self.children.get(*token) {
                     child.lookup(rest, out);
@@ -100,15 +105,27 @@ impl TrieNode {
     }
 }
 
+/// Append each slot from `src` to `out` only if not already present.
+/// O(n²) in the worst case, but for the typical ≤16 matched slots it's
+/// faster than sort+dedup and cheaper than a hash set.
+#[inline]
+fn push_unique(out: &mut MatchBuf, src: &[SlotId]) {
+    for &id in src {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn lookup(trie: &TrieNode, subject: &str) -> Vec<SlotId> {
         let tokens: Vec<&str> = subject.split('.').collect();
-        let mut out = Vec::new();
+        let mut out: MatchBuf = SmallVec::new();
         trie.lookup(&tokens, &mut out);
-        out
+        out.into_iter().collect()
     }
 
     #[test]

@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
+use smallvec::SmallVec;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, trace, warn};
 
-use crate::slot::{Delivery, Slot, SlotMap, SubHandle};
-use crate::trie::{SlotId, TrieNode};
+use crate::slot::{Delivery, SessionId, Slot, SlotMap, SubHandle};
+use crate::trie::{MatchBuf, TrieNode};
 
 /// Commands sent to the router from gRPC tasks.
 pub enum RouterCmd {
@@ -18,10 +21,18 @@ pub enum RouterCmd {
     Subscribe {
         subject: Box<str>,
         queue_group: Option<Box<str>>,
+        /// Session this subscription belongs to. All subs sharing a session
+        /// are cleaned up together by [`RouterCmd::SessionEnd`]. Callers that
+        /// do not need grouped cleanup can allocate one session per sub.
+        session_id: SessionId,
         reply: oneshot::Sender<SubHandle>,
     },
-    /// Clean up a subscriber (stream closed / disconnected).
+    /// Clean up a single subscriber (fine-grained, per-`SubId`).
     Disconnect { sub_id: crate::slot::SubId },
+    /// Clean up every subscriber registered under `session_id` in one shot.
+    /// Intended for the common "gRPC subscribe stream closed" path so the
+    /// server does not have to track its own list of SubIds.
+    SessionEnd { session_id: SessionId },
 }
 
 /// Configuration for the router.
@@ -68,8 +79,7 @@ impl Router {
     pub async fn run(mut self) {
         info!("router task started");
 
-        // Scratch buffer reused across publishes — clear, don't realloc.
-        let mut matched: Vec<SlotId> = Vec::with_capacity(64);
+        let mut matched: MatchBuf = SmallVec::new();
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -78,21 +88,25 @@ impl Router {
                     payload,
                     reply_to,
                 } => {
-                    self.sequence += 1;
-                    let seq = self.sequence;
+                    let seq = {
+                        self.sequence += 1;
+                        self.sequence
+                    };
 
                     matched.clear();
-                    let tokens: Vec<&str> = subject.split('.').collect();
-                    self.trie.lookup(&tokens, &mut matched);
+                    {
+                        // Stack-resident token buffer: SmallVec with 8 inline
+                        // slots covers every realistic subject depth. Scoped
+                        // so the borrows into `subject` end before we move
+                        // `subject` into `Delivery` below.
+                        let tokens: SmallVec<&str, 8> = subject.split('.').collect();
+                        self.trie.lookup(&tokens, &mut matched);
+                    }
 
                     if matched.is_empty() {
                         trace!(subject = %subject, seq, "publish has no matching slots");
                         continue;
                     }
-
-                    // Deduplicate (a subject can match the same slot via multiple trie paths).
-                    matched.sort_unstable_by_key(|s| s.0);
-                    matched.dedup();
 
                     debug!(
                         subject = %subject,
@@ -102,30 +116,26 @@ impl Router {
                         "publishing message"
                     );
 
-                    let delivery = Delivery {
+                    let delivery = Arc::new(Delivery {
                         subject,
                         payload,
                         sequence: seq,
                         reply_to,
-                    };
+                    });
 
                     for &slot_id in &matched {
                         match self.slots.get_mut(&slot_id) {
                             Some(Slot::Broadcast { sender, .. }) => {
-                                let _ = sender.send(delivery.clone());
+                                // `broadcast::send` is sync non-blocking: writes to
+                                // the internal ring (laggy receivers get a `Lagged`
+                                // error on their next recv) and walks the waker list
+                                // inline. No await, no dispatcher hop — the router
+                                // never yields here, so fanout never blocks publish
+                                // on unrelated subjects.
+                                let _ = sender.send(Arc::clone(&delivery));
                             }
-                            Some(Slot::QueueGroup {
-                                tx, member_ids, ..
-                            }) => {
-                                if member_ids.is_empty() {
-                                    warn!(slot_id = slot_id.0, "queue group has no members");
-                                } else {
-                                    // Await until a member reads. The bounded channel
-                                    // applies backpressure to publishers instead of
-                                    // silently dropping — filling shouldn't happen in
-                                    // practice, but we'd rather block than lose data.
-                                    let _ = tx.send(delivery.clone()).await;
-                                }
+                            Some(Slot::QueueGroup { tx, .. }) => {
+                                let _ = tx.send(Arc::clone(&delivery)).await;
                             }
                             None => {
                                 warn!(slot_id = slot_id.0, "matched slot not found in slot map");
@@ -137,17 +147,23 @@ impl Router {
                 RouterCmd::Subscribe {
                     subject,
                     queue_group,
+                    session_id,
                     reply,
                 } => {
+                    // Cold path: runs once per subscribe, heap `Vec` is fine here
+                    // (publish hot path uses `SmallVec<&str, 8>` instead).
                     let tokens: Vec<&str> = subject.split('.').collect();
 
                     let (handle, new_slot_id) = match queue_group {
-                        None => self
-                            .slots
-                            .subscribe_fanout(&subject, self.config.broadcast_capacity),
+                        None => self.slots.subscribe_fanout(
+                            &subject,
+                            session_id,
+                            self.config.broadcast_capacity,
+                        ),
                         Some(ref group) => self.slots.subscribe_queue_group(
                             &subject,
                             group,
+                            session_id,
                             self.config.queue_channel_capacity,
                         ),
                     };
@@ -164,6 +180,7 @@ impl Router {
                     info!(
                         subject = %subject,
                         queue_group = queue_group.as_deref().unwrap_or("(none)"),
+                        session_id = session_id.0,
                         sub_id,
                         new_slot = new_slot_id.map(|s| s.0),
                         "subscription created"
@@ -181,12 +198,21 @@ impl Router {
                         "subscriber disconnected"
                     );
 
-                    for (slot_id, subject) in &empty_slots {
-                        debug!(
-                            slot_id = slot_id.0,
-                            subject = %subject,
-                            "removing empty slot from trie"
-                        );
+                    for (slot_id, _) in &empty_slots {
+                        self.trie.remove(*slot_id);
+                    }
+                }
+
+                RouterCmd::SessionEnd { session_id } => {
+                    let empty_slots = self.slots.end_session(session_id);
+
+                    info!(
+                        session_id = session_id.0,
+                        removed_slots = empty_slots.len(),
+                        "session ended"
+                    );
+
+                    for (slot_id, _) in &empty_slots {
                         self.trie.remove(*slot_id);
                     }
                 }
@@ -199,8 +225,10 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
-    use crate::slot::SubHandle;
+    use crate::slot::{SessionId, SubHandle};
 
     async fn setup() -> mpsc::Sender<RouterCmd> {
         let (router, tx) = Router::new(RouterConfig::default(), 1024);
@@ -208,15 +236,31 @@ mod tests {
         tx
     }
 
+    /// Mint a fresh SessionId for each subscribe in tests.
+    fn next_session() -> SessionId {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        SessionId(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
     async fn subscribe(
         tx: &mpsc::Sender<RouterCmd>,
         subject: &str,
         queue_group: Option<&str>,
     ) -> SubHandle {
+        subscribe_in_session(tx, subject, queue_group, next_session()).await
+    }
+
+    async fn subscribe_in_session(
+        tx: &mpsc::Sender<RouterCmd>,
+        subject: &str,
+        queue_group: Option<&str>,
+        session_id: SessionId,
+    ) -> SubHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RouterCmd::Subscribe {
             subject: Box::from(subject),
             queue_group: queue_group.map(Box::from),
+            session_id,
             reply: reply_tx,
         })
         .await
@@ -271,25 +315,21 @@ mod tests {
         }
 
         let (rx1, rx2) = match (handle1, handle2) {
-            (
-                SubHandle::QueueMember { rx: rx1, .. },
-                SubHandle::QueueMember { rx: rx2, .. },
-            ) => (rx1, rx2),
+            (SubHandle::QueueMember { rx: rx1, .. }, SubHandle::QueueMember { rx: rx2, .. }) => {
+                (rx1, rx2)
+            }
             _ => panic!("Expected queue member handles"),
         };
 
-        let collect = |rx: kanal::AsyncReceiver<Delivery>| async move {
+        let collect = |rx: kanal::AsyncReceiver<Arc<Delivery>>| async move {
             let mut seen = Vec::new();
-            while let Ok(d) = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                rx.recv(),
-            )
-            .await
+            while let Ok(d) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
             {
                 match d {
-                    Ok(delivery) => seen.push(
-                        String::from_utf8(delivery.payload.to_vec()).unwrap(),
-                    ),
+                    Ok(delivery) => {
+                        seen.push(String::from_utf8(delivery.payload.to_vec()).unwrap())
+                    }
                     Err(_) => break,
                 }
             }
@@ -303,7 +343,10 @@ mod tests {
         let mut expected: Vec<String> = (0..N).map(|i| format!("msg{i}")).collect();
         expected.sort();
         assert_eq!(all, expected, "every message delivered exactly once");
-        assert!(!got1.is_empty() && !got2.is_empty(), "both members saw work");
+        assert!(
+            !got1.is_empty() && !got2.is_empty(),
+            "both members saw work"
+        );
     }
 
     #[tokio::test]
@@ -350,13 +393,10 @@ mod tests {
         // Publish to the fast subject and verify it arrives promptly.
         publish(&tx, "fast.events", b"go").await;
 
-        let delivery = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            fast_rx.recv(),
-        )
-        .await
-        .expect("router blocked: fast subject did not deliver in time")
-        .expect("fast receiver closed");
+        let delivery = tokio::time::timeout(std::time::Duration::from_millis(200), fast_rx.recv())
+            .await
+            .expect("router blocked: fast subject did not deliver in time")
+            .expect("fast receiver closed");
         assert_eq!(delivery.payload.as_ref(), b"go");
     }
 
@@ -402,15 +442,110 @@ mod tests {
         publish(&tx, "fast.events", b"go").await;
 
         // Assert the fast message never arrives — router is blocked.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            fast_rx.recv(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), fast_rx.recv()).await;
         assert!(
             result.is_err(),
             "expected router to be blocked by full queue channel, but fast.events delivered: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn deep_subject_spills_tokens_smallvec() {
+        // The token scratch buffer is `SmallVec<&str, 8>` — stack-resident
+        // up to 8 tokens, heap-spilled beyond. Make sure a 20-token subject
+        // round-trips cleanly (no crash, correct delivery).
+        let tx = setup().await;
+
+        let deep_subject = "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t";
+        assert_eq!(deep_subject.split('.').count(), 20);
+
+        let handle = subscribe(&tx, deep_subject, None).await;
+        publish(&tx, deep_subject, b"deep").await;
+
+        match handle {
+            SubHandle::Fanout { mut rx, .. } => {
+                let d = rx.recv().await.unwrap();
+                assert_eq!(&*d.subject, deep_subject);
+                assert_eq!(d.payload.as_ref(), b"deep");
+            }
+            _ => panic!("Expected fanout handle"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_with_deep_subject_still_matches() {
+        // Mix wildcard routing with a long subject to exercise both the
+        // tokens spill and the trie recursion depth.
+        let tx = setup().await;
+
+        let handle = subscribe(&tx, "deep.>", None).await;
+        publish(&tx, "deep.1.2.3.4.5.6.7.8.9.10.11.12.13.14", b"wild").await;
+
+        match handle {
+            SubHandle::Fanout { mut rx, .. } => {
+                let d = rx.recv().await.unwrap();
+                assert_eq!(d.payload.as_ref(), b"wild");
+            }
+            _ => panic!("Expected fanout handle"),
+        }
+    }
+
+    #[tokio::test]
+    async fn many_matching_slots_spills_matched_smallvec() {
+        // The matched scratch buffer is `SmallVec<SlotId, 16>`. Create more
+        // than 16 slots that all match the same publish to force a heap spill
+        // and confirm every subscriber still receives the message.
+        let tx = setup().await;
+
+        // 20 distinct subjects, each wildcard-matching `events.all.one`.
+        // Use the `>` tail-match at various subject depths so they end up in
+        // different trie nodes (and therefore different SlotIds).
+        let patterns = [
+            "events.>",
+            "events.all.>",
+            "events.all.one",
+            "events.*.one",
+            "events.*.*",
+            "events.*.>",
+            "*.all.one",
+            "*.all.*",
+            "*.all.>",
+            "*.*.one",
+            "*.*.*",
+            "*.*.>",
+            ">",
+            "events.*.one",   // intentional dup pattern variant → new sub
+            "events.all.one", // intentional dup pattern variant → new sub
+            "events.all.>",   // intentional dup pattern variant → new sub
+            "events.>",       // intentional dup pattern variant → new sub
+            "*.*.*",          // intentional dup pattern variant → new sub
+            "*.>",
+            "events.all.one", // one more to push past 16
+        ];
+        assert!(patterns.len() > 16);
+
+        let mut handles = Vec::new();
+        for p in patterns {
+            handles.push(subscribe(&tx, p, None).await);
+        }
+
+        publish(&tx, "events.all.one", b"fan").await;
+
+        // Every subscriber must receive it. Use a small timeout to avoid
+        // hanging the test if something goes wrong.
+        for h in handles {
+            match h {
+                SubHandle::Fanout { mut rx, .. } => {
+                    let d = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                        .await
+                        .expect("subscriber did not receive within 200ms")
+                        .expect("channel closed");
+                    assert_eq!(d.payload.as_ref(), b"fan");
+                }
+                _ => panic!("Expected fanout handle"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -441,5 +576,147 @@ mod tests {
             }
             _ => panic!("Expected fanout handle"),
         }
+    }
+
+    #[tokio::test]
+    async fn fanout_send_never_blocks_router() {
+        // With the dispatcher task gone, `broadcast::send` runs synchronously on
+        // the router and never blocks: laggy receivers get `Lagged` on their
+        // next recv, but router keeps flowing. Prove that a slot whose sole
+        // subscriber never drains cannot stall delivery on other subjects, even
+        // when we publish well beyond the broadcast ring's capacity.
+        let config = RouterConfig {
+            broadcast_capacity: 16,
+            queue_channel_capacity: 256,
+        };
+        let (router, tx) = Router::new(config, 1024);
+        tokio::spawn(router.run());
+
+        // Slow fanout sub — hold the receiver but never call recv().
+        let slow_handle = subscribe(&tx, "slow.fanout", None).await;
+        let _slow_rx = match slow_handle {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Fast fanout sub on a different subject.
+        let fast_handle = subscribe(&tx, "fast.events", None).await;
+        let mut fast_rx = match fast_handle {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Bury the slow slot with 10x its capacity. Router must not await.
+        for i in 0..160 {
+            publish(&tx, "slow.fanout", format!("{i}").as_bytes()).await;
+        }
+
+        // Fast subject should deliver promptly — router is not blocked.
+        publish(&tx, "fast.events", b"go").await;
+
+        let delivery = tokio::time::timeout(std::time::Duration::from_millis(200), fast_rx.recv())
+            .await
+            .expect("router blocked: fast subject did not deliver in time")
+            .expect("fast receiver closed");
+        assert_eq!(delivery.payload.as_ref(), b"go");
+    }
+
+    #[tokio::test]
+    async fn lagged_subscriber_gets_lagged_error() {
+        // Publishing past broadcast capacity with a slow receiver should surface
+        // `RecvError::Lagged(n)` to that receiver on its next recv. Confirms the
+        // overflow semantics we rely on now that there is no dispatcher cushion.
+        use tokio::sync::broadcast::error::RecvError;
+
+        let config = RouterConfig {
+            broadcast_capacity: 4,
+            queue_channel_capacity: 256,
+        };
+        let (router, tx) = Router::new(config, 1024);
+        tokio::spawn(router.run());
+
+        let handle = subscribe(&tx, "lag.test", None).await;
+        let mut rx = match handle {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Publish 10 messages into a capacity-4 ring — last 4 survive.
+        for i in 0..10u8 {
+            publish(&tx, "lag.test", &[i]).await;
+        }
+
+        // Give the router time to drain its input queue.
+        tokio::task::yield_now().await;
+
+        match rx.recv().await {
+            Err(RecvError::Lagged(n)) => {
+                assert!(n > 0, "expected positive lag count, got {n}");
+            }
+            other => panic!("expected RecvError::Lagged, got {other:?}"),
+        }
+
+        // After the Lagged signal the receiver rejoins at the current head.
+        let d = rx.recv().await.expect("recv after lag");
+        let payload = d.payload.as_ref();
+        assert_eq!(payload.len(), 1, "payload should be 1 byte");
+        assert!(payload[0] >= 6, "expected latest window, got byte {}", payload[0]);
+    }
+
+    #[tokio::test]
+    async fn session_end_removes_all_subs() {
+        // A single SessionEnd must drop every sub created under that session,
+        // regardless of subject or queue-group, and prune empty slots from the
+        // trie so later subscribers see a clean state.
+        let tx = setup().await;
+        let session = SessionId(42);
+
+        // Mix 3 fanout subs on distinct subjects + 1 queue-group member.
+        let subjects = ["alpha.one", "alpha.two", "beta.three"];
+        let mut handles = Vec::new();
+        for s in subjects {
+            handles.push(subscribe_in_session(&tx, s, None, session).await);
+        }
+        handles.push(subscribe_in_session(&tx, "gamma.work", Some("g"), session).await);
+
+        // Extra sub on "alpha.one" in a DIFFERENT session — should survive SessionEnd.
+        let other_session = SessionId(99);
+        let mut survivor = match subscribe_in_session(&tx, "alpha.one", None, other_session).await {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+
+        // Drop the session's receivers so SessionEnd has no client-side cleanup
+        // racing with it.
+        drop(handles);
+
+        tx.send(RouterCmd::SessionEnd {
+            session_id: session,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        // Subscribe fresh on a previously-shared subject to confirm the slot
+        // was not retained (publish still reaches both the fresh sub and the
+        // out-of-session survivor — proves slot was rebuilt or reused cleanly).
+        let fresh = subscribe(&tx, "alpha.one", None).await;
+        let mut fresh_rx = match fresh {
+            SubHandle::Fanout { rx, .. } => rx,
+            _ => panic!("expected fanout"),
+        };
+        publish(&tx, "alpha.one", b"after-session-end").await;
+
+        let d = tokio::time::timeout(std::time::Duration::from_millis(200), fresh_rx.recv())
+            .await
+            .expect("fresh sub did not receive")
+            .expect("fresh sub channel closed");
+        assert_eq!(d.payload.as_ref(), b"after-session-end");
+
+        let d2 = tokio::time::timeout(std::time::Duration::from_millis(200), survivor.recv())
+            .await
+            .expect("survivor did not receive")
+            .expect("survivor channel closed");
+        assert_eq!(d2.payload.as_ref(), b"after-session-end");
     }
 }
